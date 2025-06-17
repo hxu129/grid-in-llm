@@ -11,7 +11,7 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out' # ignored if init_from is not 'resume'
-start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+start = "0 5 0" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
@@ -20,7 +20,61 @@ seed = 1337
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
-exec(open('configurator.py').read()) # overrides from command line or config file
+# -----------------------------------------------------------------------------
+# Configuration for training GPT on maze navigation data
+# Optimized for path learning task
+
+# I/O
+out_dir = 'out-maze-nav'
+eval_interval = 250
+log_interval = 10
+eval_iters = 100
+eval_only = False
+always_save_checkpoint = True
+init_from = 'resume'
+
+# wandb logging
+wandb_log = False
+wandb_project = 'maze-nav'
+wandb_run_name = 'maze-nav-gpt'
+
+# data
+dataset = 'maze/maze_nav_data'  # This should match your maze data directory
+gradient_accumulation_steps = 1  # Reduced for smaller sequences
+batch_size = 32  # Reasonable batch size for path learning
+max_seq_len = 512  # Maximum sequence length for any path (no artificial limit)
+
+# model - smaller model suitable for maze navigation
+n_layer = 6   # Fewer layers for simpler task
+n_head = 6    # Fewer attention heads
+n_embd = 192  # Smaller embedding dimension
+dropout = 0.1 # Some dropout for regularization
+bias = False  # Cleaner model
+
+# adamw optimizer
+learning_rate = 3e-4  # Slightly higher learning rate
+max_iters = 5000      # Fewer iterations needed
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+
+# learning rate decay settings
+decay_lr = True
+warmup_iters = 100    # Quick warmup
+lr_decay_iters = 5000 # Match max_iters
+min_lr = 3e-5
+
+# DDP settings
+backend = 'nccl'
+
+# system
+device = 'cuda'
+# Note: dtype check is done in train.py
+dtype = 'bfloat16'  # will be validated in train.py
+compile = True 
+
+
 # -----------------------------------------------------------------------------
 
 torch.manual_seed(seed)
@@ -62,10 +116,35 @@ if load_meta:
     print(f"Loading meta from {meta_path}...")
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
-    # TODO want to make this more general to arbitrary encoder/decoder schemes
+    # Handle both string and integer tokens for maze navigation
     stoi, itos = meta['stoi'], meta['itos']
-    encode = lambda s: [stoi[c] for c in s]
-    decode = lambda l: ''.join([itos[i] for i in l])
+    
+    def encode(s):
+        if isinstance(s, str):
+            if s.isdigit():
+                # Handle numeric node IDs
+                return [stoi[s]] if s in stoi else [int(s)]
+            else:
+                # Handle direction tokens or other strings
+                tokens = s.split()
+                return [stoi[token] if token in stoi else int(token) if token.isdigit() else stoi.get(token, 0) for token in tokens]
+        elif isinstance(s, list):
+            # Handle list of tokens
+            return [stoi[str(token)] if str(token) in stoi else (int(token) if isinstance(token, str) and token.isdigit() else token) for token in s]
+        else:
+            return [stoi[str(s)] if str(s) in stoi else s]
+    
+    def decode(l):
+        if 'direction_tokens' in meta:
+            # Maze navigation specific decoding
+            result = []
+            for i in l:
+                token = itos.get(i, str(i))
+                result.append(token)
+            return ' '.join(result)
+        else:
+            # Standard string concatenation
+            return ''.join([itos.get(i, str(i)) for i in l])
 else:
     # ok let's assume gpt-2 encodings by default
     print("No meta.pkl found, assuming GPT-2 encodings...")
@@ -77,7 +156,10 @@ else:
 if start.startswith('FILE:'):
     with open(start[5:], 'r', encoding='utf-8') as f:
         start = f.read()
+
+print(f"Starting with: {start}")
 start_ids = encode(start)
+print(f"Encoded as: {start_ids}")
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
 # run generation
@@ -85,5 +167,9 @@ with torch.no_grad():
     with ctx:
         for k in range(num_samples):
             y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
+            generated_sequence = y[0].tolist()
+            decoded_output = decode(generated_sequence)
+            print(f"Sample {k+1}:")
+            print(f"Raw tokens: {generated_sequence}")
+            print(f"Decoded: {decoded_output}")
             print('---------------')

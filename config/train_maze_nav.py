@@ -16,10 +16,10 @@ wandb_project = 'maze-nav'
 wandb_run_name = 'maze-nav-gpt'
 
 # data
-dataset = 'maze_nav_data'  # This should match your maze data directory
+dataset = 'maze/maze_nav_data'  # This should match your maze data directory
 gradient_accumulation_steps = 1  # Reduced for smaller sequences
 batch_size = 32  # Reasonable batch size for path learning
-block_size = 128  # Sufficient for most maze paths
+max_seq_len = 512  # Maximum sequence length for any path (no artificial limit)
 
 # model - smaller model suitable for maze navigation
 n_layer = 6   # Fewer layers for simpler task

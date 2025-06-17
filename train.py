@@ -20,6 +20,7 @@ import os
 import time
 import math
 import pickle
+import random
 from contextlib import nullcontext
 
 import numpy as np
@@ -47,13 +48,13 @@ wandb_run_name = 'gpt2' # 'run' + str(time.time())
 dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 1024
 # model
 n_layer = 12
 n_head = 12
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
+max_seq_len = 1024  # Maximum sequence length for sinusoidal embeddings
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -74,7 +75,60 @@ dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) # overrides from command line or config file
+# -----------------------------------------------------------------------------
+# Configuration for training GPT on maze navigation data
+# Optimized for path learning task
+
+# I/O
+out_dir = 'out-maze-nav'
+eval_interval = 250
+log_interval = 10
+eval_iters = 100
+eval_only = False
+always_save_checkpoint = True
+init_from = 'scratch'
+
+# wandb logging
+wandb_log = False
+wandb_project = 'maze-nav'
+wandb_run_name = 'maze-nav-gpt'
+
+# data
+dataset = 'maze/maze_nav_data'  # This should match your maze data directory
+gradient_accumulation_steps = 1  # Reduced for smaller sequences
+batch_size = 32  # Reasonable batch size for path learning
+max_seq_len = 512  # Maximum sequence length for any path (no artificial limit)
+
+# model - smaller model suitable for maze navigation
+n_layer = 6   # Fewer layers for simpler task
+n_head = 6    # Fewer attention heads
+n_embd = 192  # Smaller embedding dimension
+dropout = 0.1 # Some dropout for regularization
+bias = False  # Cleaner model
+
+# adamw optimizer
+learning_rate = 3e-4  # Slightly higher learning rate
+max_iters = 5000      # Fewer iterations needed
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+
+# learning rate decay settings
+decay_lr = True
+warmup_iters = 100    # Quick warmup
+lr_decay_iters = 5000 # Match max_iters
+min_lr = 3e-5
+
+# DDP settings
+backend = 'nccl'
+
+# system
+device = 'cuda'
+# Note: dtype check is done in train.py
+dtype = 'bfloat16'  # will be validated in train.py
+compile = True 
+
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
@@ -98,7 +152,7 @@ else:
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
-tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
+tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * max_seq_len
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
@@ -113,6 +167,7 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
+
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
@@ -120,14 +175,114 @@ def get_batch(split):
         data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     else:
         data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    
+    # Check if this is path data by looking for meta.pkl
+    meta_path = os.path.join(data_dir, 'meta.pkl')
+    is_path_data = os.path.exists(meta_path)
+    
+    if is_path_data:
+        # For path data: sample complete sequences instead of fixed blocks
+        # This requires parsing the sequences from the flattened token stream
+        return get_path_batch(data, split)
+    else:
+        # Original behavior for continuous text data
+        ix = torch.randint(len(data) - max_seq_len, (batch_size,))
+        x = torch.stack([torch.from_numpy((data[i:i+max_seq_len]).astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+max_seq_len]).astype(np.int64)) for i in ix])
+        if device_type == 'cuda':
+            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+            x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        else:
+            x, y = x.to(device), y.to(device)
+        return x, y
+
+def get_path_batch(data, split):
+    """Get batch for path learning with variable-length sequences."""
+    # For maze path data, we need to reconstruct sequences from the flattened data
+    # We'll sample random starting positions and extract complete sequences
+    
+    # Load metadata to understand the structure
+    meta_path = os.path.join(data_dir, 'meta.pkl')
+    with open(meta_path, 'rb') as f:
+        meta = pickle.load(f)
+    
+    # Extract sequences by finding sequence boundaries
+    # In our format: [start_node, end_node, start_node, direction, next_node, direction, next_node, ...]
+    sequences = []
+    i = 0
+    max_seq_len = 0
+    
+    while i < len(data) - 2:
+        # Look for sequence pattern: start_node, end_node, start_node
+        start_node = int(data[i])
+        end_node = int(data[i + 1])
+        current_node = int(data[i + 2])
+        
+        if start_node == current_node:  # Valid sequence start
+            seq = [start_node, end_node, current_node]
+            i += 3
+            
+            # Continue reading direction/node pairs until we reach end_node or data ends
+            while i < len(data) - 1:
+                direction = int(data[i])
+                next_node = int(data[i + 1])
+                seq.extend([direction, next_node])
+                i += 2
+                
+                if next_node == end_node:  # Sequence complete
+                    break
+            
+            if len(seq) >= 5:  # Minimum valid sequence
+                sequences.append(seq)
+                max_seq_len = max(max_seq_len, len(seq))
+        else:
+            i += 1
+    
+    # Sample batch_size sequences
+    if len(sequences) < batch_size:
+        # If we don't have enough sequences, repeat some
+        sequences = sequences * ((batch_size // len(sequences)) + 1)
+    
+    sampled_sequences = random.sample(sequences, min(batch_size, len(sequences)))
+    
+    # Pad sequences to the same length for batching
+    if not sampled_sequences:
+        # Fallback to original behavior if no sequences found
+        ix = torch.randint(len(data) - max_seq_len, (batch_size,))
+        x = torch.stack([torch.from_numpy((data[i:i+max_seq_len]).astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+max_seq_len]).astype(np.int64)) for i in ix])
+    else:
+        max_len = min(max([len(seq) for seq in sampled_sequences]), max_seq_len)
+        
+        x_batch = []
+        y_batch = []
+        
+        for seq in sampled_sequences:
+            # Truncate or pad sequence
+            if len(seq) > max_len:
+                seq = seq[:max_len]
+            
+            # Create input (x) and target (y) sequences
+            x_seq = seq[:-1] if len(seq) > 1 else seq + [0]  # Input is all but last token
+            y_seq = seq[1:] if len(seq) > 1 else [0]        # Target is shifted by 1
+            
+            # Pad to max_len
+            while len(x_seq) < max_len:
+                x_seq.append(0)  # Pad with 0 (or use a special padding token)
+            while len(y_seq) < max_len:
+                y_seq.append(-1)  # Pad targets with -1 (ignored in loss)
+            
+            x_batch.append(x_seq[:max_len])
+            y_batch.append(y_seq[:max_len])
+        
+        x = torch.tensor(x_batch, dtype=torch.long)
+        y = torch.tensor(y_batch, dtype=torch.long)
+    
     if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
+    
     return x, y
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -144,7 +299,7 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
+model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, max_seq_len=max_seq_len,
                   bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
@@ -163,7 +318,7 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'max_seq_len', 'bias', 'vocab_size']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
@@ -184,12 +339,9 @@ elif init_from.startswith('gpt2'):
     override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'max_seq_len', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
-# crop down the model block size if desired, using model surgery
-if block_size < model.config.block_size:
-    model.crop_block_size(block_size)
-    model_args['block_size'] = block_size # so that the checkpoint will have the right value
+# No need to crop model since we use sinusoidal embeddings
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
