@@ -10,6 +10,7 @@ import json
 import random
 import os
 import sys
+import pickle
 from typing import List, Dict, Tuple, Set, Optional
 from collections import deque
 from dataclasses import dataclass
@@ -101,6 +102,14 @@ class MazeNavDataGenerator:
         print(f"Vocabulary size: {self.vocab_size}")
         print(f"Node tokens: 0-{num_nodes-1}")
         print(f"Direction tokens: {self.direction_tokens}")
+        
+        # Create encode and decode functions for compatibility with sample.py
+        if self.config.vocab_encoding == "numeric":
+            self.encode = lambda tokens: [token if isinstance(token, int) else self.direction_name_to_id[token] for token in tokens]
+            self.decode = lambda token_ids: [self.id_to_token[token_id] for token_id in token_ids]
+        else:
+            self.encode = lambda tokens: [self.token_to_id[token] for token in tokens]
+            self.decode = lambda token_ids: [self.id_to_token[token_id] for token_id in token_ids]
     
     def find_all_reachable_pairs(self) -> List[Tuple[int, int]]:
         """Find all pairs of nodes that are reachable from each other."""
@@ -366,6 +375,95 @@ class MazeNavDataGenerator:
         print(f"Dataset saved to: {filepath}")
         return filepath
     
+    def save_meta_pkl(self, dataset: Dict):
+        """Save meta.pkl file for compatibility with train.py and sample.py."""
+        print("Saving meta.pkl file...")
+        
+        os.makedirs(self.config.output_dir, exist_ok=True)
+        meta_path = os.path.join(self.config.output_dir, 'meta.pkl')
+        
+        # Create stoi and itos mappings compatible with sample.py
+        if self.config.vocab_encoding == "numeric":
+            # For numeric encoding, map numbers to themselves and directions to their IDs
+            stoi = {}
+            itos = {}
+            
+            # Add nodes
+            for i in range(self.maze_data['num_nodes']):
+                stoi[str(i)] = i
+                itos[i] = str(i)
+            
+            # Add directions
+            for direction, idx in self.direction_name_to_id.items():
+                stoi[direction] = idx
+                itos[idx] = direction
+        else:
+            # For mixed encoding, use the existing token mappings
+            stoi = {}
+            itos = {}
+            
+            for token, token_id in self.token_to_id.items():
+                stoi[str(token)] = token_id
+                itos[token_id] = str(token)
+        
+        meta = {
+            'vocab_size': self.vocab_size,
+            'stoi': stoi,
+            'itos': itos,
+            'config': dataset['config'],
+            'token_to_id': self.token_to_id,
+            'id_to_token': self.id_to_token,
+            'direction_tokens': self.direction_tokens
+        }
+        
+        with open(meta_path, 'wb') as f:
+            pickle.dump(meta, f)
+        
+        print(f"Meta file saved to: {meta_path}")
+        return meta_path
+    
+    def save_binary_data(self, dataset: Dict):
+        """Save training data in binary format compatible with train.py."""
+        print("Saving binary training data...")
+        
+        os.makedirs(self.config.output_dir, exist_ok=True)
+        
+        # Convert sequences to token IDs and flatten them
+        def sequences_to_binary(sequences, filename):
+            all_tokens = []
+            
+            for seq_data in sequences:
+                sequence = seq_data['sequence']
+                # Convert to token IDs
+                token_ids = self.encode(sequence)
+                all_tokens.extend(token_ids)
+            
+            if all_tokens:
+                # Convert to numpy array with appropriate dtype
+                max_token_id = max(all_tokens)
+                if max_token_id < 65536:  # uint16 range
+                    dtype = np.uint16
+                else:
+                    dtype = np.uint32
+                
+                tokens_array = np.array(all_tokens, dtype=dtype)
+                filepath = os.path.join(self.config.output_dir, filename)
+                tokens_array.tofile(filepath)
+                print(f"Saved {len(all_tokens)} tokens to {filepath}")
+                return len(all_tokens)
+            else:
+                print(f"No tokens to save for {filename}")
+                return 0
+        
+        # Save train and validation data
+        train_tokens = sequences_to_binary(dataset['train']['sequences'], 'train.bin')
+        val_tokens = sequences_to_binary(dataset['test']['sequences'], 'val.bin')
+        
+        print(f"Training tokens: {train_tokens:,}")
+        print(f"Validation tokens: {val_tokens:,}")
+        
+        return train_tokens, val_tokens
+    
     def create_pytorch_dataset(self, dataset: Dict) -> Dict:
         """Create PyTorch-ready dataset format."""
         print("Creating PyTorch-ready dataset...")
@@ -523,11 +621,11 @@ def main():
     """Main function to generate maze navigation training data."""
     # Configuration
     config = MazeNavConfig(
-        maze_size=10,  # 40x40 (1600 nodes) for place cell analysis
+        maze_size=10,  # Start with smaller maze for testing
         seed=42,
         train_test_split=0.5,
         output_dir="maze_nav_data",
-        max_pairs=15000,  # Increased for larger maze
+        max_pairs=1000,  # Smaller for testing
         vocab_encoding="mixed"  # "numeric" or "mixed"
     )
     
@@ -535,8 +633,14 @@ def main():
     generator = MazeNavDataGenerator(config)
     dataset = generator.generate_training_data()
     
-    # Save dataset
+    # Save dataset files
     dataset_path = generator.save_dataset(dataset)
+    
+    # Save meta.pkl for train.py compatibility
+    meta_path = generator.save_meta_pkl(dataset)
+    
+    # Save binary data for train.py compatibility
+    train_tokens, val_tokens = generator.save_binary_data(dataset)
     
     # Create PyTorch-ready version
     pytorch_dataset = generator.create_pytorch_dataset(dataset)
@@ -568,6 +672,9 @@ def main():
     print(f"Average sequence length: {dataset['stats']['avg_train_length']:.1f}")
     print(f"Max sequence length: {dataset['stats']['max_sequence_length']}")
     print(f"Dataset saved to: {dataset_path}")
+    print(f"Meta file saved to: {meta_path}")
+    print(f"Binary training data: train.bin ({train_tokens:,} tokens)")
+    print(f"Binary validation data: val.bin ({val_tokens:,} tokens)")
     print(f"PyTorch dataset saved to: {pytorch_path}")
     
     # Show visualization info
