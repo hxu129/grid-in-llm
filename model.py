@@ -161,6 +161,8 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
+        # Add alias for transformer_utils compatibility
+        self.transformer.final_layernorm = self.transformer.ln_f
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -177,6 +179,14 @@ class GPT(nn.Module):
 
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+    @property
+    def base_model(self):
+        """
+        Property to make the model compatible with transformer_utils library.
+        Returns the transformer module which contains the layers (h) and final layer norm (ln_f).
+        """
+        return self.transformer
 
     def get_num_params(self, non_embedding=True):
         """
