@@ -126,7 +126,7 @@ backend = 'nccl'
 device = 'cuda'
 # Note: dtype check is done in train.py
 dtype = 'bfloat16'  # will be validated in train.py
-compile = True 
+compile = False 
 
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
