@@ -171,6 +171,10 @@ class GPT(nn.Module):
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
     @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @property
     def base_model(self):
         """
         Property to make the model compatible with transformer_utils library.
