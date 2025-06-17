@@ -15,16 +15,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-class LayerNorm(nn.Module):
-    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
-
-    def __init__(self, ndim, bias):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
-
-    def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
 class SinusoidalPositionalEncoding(nn.Module):
     """Sinusoidal positional encoding that can handle any sequence length."""
@@ -127,9 +117,9 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = nn.LayerNorm(config.n_embd, elementwise_affine=config.bias)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = nn.LayerNorm(config.n_embd, elementwise_affine=config.bias)
         self.mlp = MLP(config)
 
     def forward(self, x):
@@ -159,7 +149,7 @@ class GPT(nn.Module):
             wpe = SinusoidalPositionalEncoding(config.n_embd, config.max_seq_len),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f = nn.LayerNorm(config.n_embd, elementwise_affine=config.bias),
         ))
         # Add alias for transformer_utils compatibility
         self.transformer.final_layernorm = self.transformer.ln_f
