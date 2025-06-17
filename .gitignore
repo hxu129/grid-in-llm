@@ -10,3 +10,5 @@ __pycache__/
 input.txt
 env/
 venv/
+
+data/maze/maze_nav_data
