@@ -107,7 +107,7 @@ bias = False  # Cleaner model
 
 # adamw optimizer
 learning_rate = 3e-4  # Slightly higher learning rate
-max_iters = 5000      # Fewer iterations needed
+max_iters = 100      # Fewer iterations needed
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95

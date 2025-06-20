@@ -91,7 +91,6 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-        attn_weights_to_return = None
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
@@ -100,9 +99,14 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        attn_weights_to_return = None
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, 
+                                                                 dropout_p=self.dropout if self.training else 0, 
+                                                                 is_causal=True)
+            # Note: Flash attention doesn't return attention weights for efficiency
+            attn_weights_to_return = None
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -159,7 +163,10 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     max_seq_len: int = 10000  # Maximum sequence length for positional encoding
-
+    
+    # Additional attributes for HuggingFace compatibility
+    top_k: int = 50
+    temperature: float = 1.0
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -227,9 +234,36 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, return_dict=False):
-        device = idx.device
-        b, t = idx.size()
+    def forward(self, input_ids=None, inputs_embeds=None, targets=None, return_dict=False, **kwargs):
+        """
+        Forward pass with HuggingFace-style arguments.
+        
+        Args:
+            input_ids: Token IDs of shape (batch_size, sequence_length)
+            inputs_embeds: Pre-computed embeddings of shape (batch_size, sequence_length, hidden_size)
+            targets: Target token IDs for loss computation
+            return_dict: Whether to return a structured output
+        """
+        # Handle both input_ids and inputs_embeds (HuggingFace convention)
+        if inputs_embeds is not None:
+            # If embeddings are provided directly, use them
+            if input_ids is not None:
+                raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+            tok_emb = inputs_embeds.to(self.device)
+            b, t, _ = tok_emb.size()
+        elif input_ids is not None:
+            # If token IDs are provided, convert to embeddings
+            if not isinstance(input_ids, torch.Tensor):
+                idx = torch.tensor(input_ids, dtype=torch.long, device=self.device)
+            else:
+                idx = input_ids.to(device=self.device)
+            b, t = idx.size()
+            tok_emb = self.transformer.wte(idx)
+        else:
+            raise ValueError("You must specify either input_ids or inputs_embeds")
+        
+        # Note: attention_mask is accepted but not used since this is a causal model
+        # that generates its own causal mask internally
         
         all_hidden_states = [] if return_dict else None
         all_attentions = [] if return_dict else None
@@ -237,10 +271,8 @@ class GPT(nn.Module):
         # No block size constraints - handle any sequence length
         if t > self.config.max_seq_len:
             print(f"Warning: sequence length {t} exceeds max_seq_len {self.config.max_seq_len}")
-            # Could truncate or extend max_seq_len as needed
         
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        # Add positional embeddings
         pos_emb = self.transformer.wpe(tok_emb) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
 
@@ -377,15 +409,24 @@ class GPT(nn.Module):
         return mfu
 
     @torch.no_grad()
-    def generate(self, input_ids, max_length, temperature=1.0,
-                 do_sample=False, top_k=None,
+    def generate(self, input_ids=None, max_length=None,
+                 temperature=1.0, do_sample=False, top_k=None, 
                  return_dict_in_generate=False, **generate_kwargs):
         """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        Generate text with HuggingFace-compatible interface.
+        
+        Args:
+            input_ids: Input token IDs (HuggingFace style)
+            max_length: Maximum total sequence length
+            temperature: Sampling temperature
+            do_sample: Whether to use sampling or greedy decoding
+            top_k: Top-k sampling parameter
+            return_dict_in_generate: Whether to return structured output
         """
+            
         self.eval() # Set model to evaluation mode
+
+        input_ids = torch.tensor(input_ids, device=self.device)
 
         # Keep track of collected outputs
         all_scores = [] if return_dict_in_generate else None
@@ -395,39 +436,34 @@ class GPT(nn.Module):
         max_new_tokens = max_length - input_ids.size(1)
         for _ in range(max_new_tokens):
             # forward the model to get the logits for the index in the sequence
-            outputs = self(input_ids,
-                           return_dict=return_dict_in_generate)
+            outputs = self(input_ids=input_ids, return_dict=return_dict_in_generate)
             
             if return_dict_in_generate:
                 logits = outputs.logits[:, -1, :] / temperature
-            else:
-                logits, loss = outputs  # Fixed: was incorrectly unpacking as (logits, attn)
-                logits = logits[:, -1, :] / temperature
-
-            if return_dict_in_generate:
-                # We save the logits for the single last step.
-                # Note: HG scores are before temperature scaling, so we use outputs.logits
-                all_scores.append(outputs.logits)
+                all_scores.append(logits)  # Save post-temperature logits
                 all_hidden_states.append(outputs.hidden_states)
                 all_attentions.append(outputs.attentions)
+            else:
+                logits, _ = outputs
+                logits = logits[:, -1, :] / temperature
 
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
+            
             # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)  # Fixed: removed incorrect .squeeze(1)
+            probs = F.softmax(logits, dim=-1)
 
             # sample from the distribution
             if do_sample:
                 input_ids_next = torch.multinomial(probs, num_samples=1)
             else:
-                # The .squeeze(1) above means we don't need keepdim=True here
-                input_ids_next = torch.argmax(probs, dim=-1, keepdim=True)
+                _, input_ids_next = torch.topk(probs, k=1, dim=-1)
 
             # append sampled index to the running sequence and continue
             input_ids = torch.cat((input_ids, input_ids_next), dim=1)
-            if input_ids_next == input_ids[:, 1]:
+            if input_ids_next == input_ids[:, 1]: # specially designed for solving maze
                 break
 
         if return_dict_in_generate:
