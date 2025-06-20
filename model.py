@@ -10,11 +10,31 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 import math
 import inspect
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+@dataclass
+class ForwardOutput(object):
+    """
+    Output of a causal language model.
+    """
+    loss: Optional[torch.Tensor]
+    logits: Optional[torch.Tensor]
+    hidden_states: Optional[torch.Tensor]
+    attentions: Optional[torch.Tensor]
+
+@dataclass
+class DecoderOnlyOutput(object):
+    """
+    Output of a decoder-only language model during the generation process.
+    """
+    sequences: Optional[torch.Tensor]
+    scores: Optional[torch.Tensor]
+    hidden_states: Optional[torch.Tensor]
+    attentions: Optional[torch.Tensor]
 
 class SinusoidalPositionalEncoding(nn.Module):
     """Sinusoidal positional encoding that can handle any sequence length."""
@@ -71,6 +91,7 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        attn_weights_to_return = None
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
@@ -89,13 +110,14 @@ class CausalSelfAttention(nn.Module):
             causal_mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
             att = att.masked_fill(~causal_mask, float('-inf'))
             att = F.softmax(att, dim=-1)
+            attn_weights_to_return = att
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
-        return y
+        return y, attn_weights_to_return
 
 class MLP(nn.Module):
 
@@ -123,9 +145,10 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+        y, attn_weights = self.attn(self.ln_1(x))
+        x = x + y
         x = x + self.mlp(self.ln_2(x))
-        return x
+        return x, attn_weights
 
 @dataclass
 class GPTConfig:
@@ -204,9 +227,12 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, return_dict=False):
         device = idx.device
         b, t = idx.size()
+        
+        all_hidden_states = [] if return_dict else None
+        all_attentions = [] if return_dict else None
         
         # No block size constraints - handle any sequence length
         if t > self.config.max_seq_len:
@@ -217,20 +243,36 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(tok_emb) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
+
+        if return_dict:
+            all_hidden_states.append(x)
+
         for block in self.transformer.h:
-            x = block(x)
+            x, attn_weights = block(x)
+            if return_dict:
+                all_hidden_states.append(x)
+                all_attentions.append(attn_weights)
+
         x = self.transformer.ln_f(x)
 
+        loss = None
+        # if we are given some desired targets also calculate the loss
         if targets is not None:
-            # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
 
-        return logits, loss
+        if return_dict:
+            return ForwardOutput(
+                loss=loss,
+                logits=logits,
+                hidden_states=tuple(all_hidden_states) if all_hidden_states else None,
+                attentions=tuple(all_attentions) if all_attentions else None
+            )
+        else:
+            return logits, loss
 
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
@@ -335,29 +377,65 @@ class GPT(nn.Module):
         return mfu
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, input_ids, max_length, temperature=1.0,
+                 do_sample=False, top_k=None,
+                 return_dict_in_generate=False, **generate_kwargs):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+        self.eval() # Set model to evaluation mode
+
+        # Keep track of collected outputs
+        all_scores = [] if return_dict_in_generate else None
+        all_hidden_states = [] if return_dict_in_generate else None
+        all_attentions = [] if return_dict_in_generate else None
+
+        max_new_tokens = max_length - input_ids.size(1)
         for _ in range(max_new_tokens):
-            # No need to crop - sinusoidal embeddings can handle any length
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+            outputs = self(input_ids,
+                           return_dict=return_dict_in_generate)
+            
+            if return_dict_in_generate:
+                logits = outputs.logits[:, -1, :] / temperature
+            else:
+                logits, loss = outputs  # Fixed: was incorrectly unpacking as (logits, attn)
+                logits = logits[:, -1, :] / temperature
+
+            if return_dict_in_generate:
+                # We save the logits for the single last step.
+                # Note: HG scores are before temperature scaling, so we use outputs.logits
+                all_scores.append(outputs.logits)
+                all_hidden_states.append(outputs.hidden_states)
+                all_attentions.append(outputs.attentions)
+
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
+            probs = F.softmax(logits, dim=-1)  # Fixed: removed incorrect .squeeze(1)
+
             # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)
+            if do_sample:
+                input_ids_next = torch.multinomial(probs, num_samples=1)
+            else:
+                # The .squeeze(1) above means we don't need keepdim=True here
+                input_ids_next = torch.argmax(probs, dim=-1, keepdim=True)
+
             # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
-            if idx_next == idx[:, 1]:
+            input_ids = torch.cat((input_ids, input_ids_next), dim=1)
+            if input_ids_next == input_ids[:, 1]:
                 break
 
-        return idx
+        if return_dict_in_generate:
+            return DecoderOnlyOutput(
+                sequences=input_ids,
+                scores=tuple(all_scores) if all_scores else None,
+                hidden_states=tuple(all_hidden_states) if all_hidden_states else None,
+                attentions=tuple(all_attentions) if all_attentions else None
+            )
+        else:
+            return input_ids
