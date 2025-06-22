@@ -76,57 +76,8 @@ compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 # -----------------------------------------------------------------------------
-# Configuration for training GPT on maze navigation data
-# Optimized for path learning task
-
-# I/O
-out_dir = 'out-maze-nav'
-eval_interval = 250
-log_interval = 10
-eval_iters = 100
-eval_only = False
-always_save_checkpoint = True
-
-# wandb logging
-wandb_log = False
-wandb_project = 'maze-nav'
-wandb_run_name = 'maze-nav-gpt'
-
-# data
-dataset = 'maze/maze_nav_data'  # This should match your maze data directory
-gradient_accumulation_steps = 1  # Reduced for smaller sequences
-batch_size = 32  # Reasonable batch size for path learning
-max_seq_len = 512  # Maximum sequence length for any path (no artificial limit)
-
-# model - smaller model suitable for maze navigation
-n_layer = 6   # Fewer layers for simpler task
-n_head = 6    # Fewer attention heads
-n_embd = 192  # Smaller embedding dimension
-dropout = 0.1 # Some dropout for regularization
-bias = False  # Cleaner model
-
-# adamw optimizer
-learning_rate = 3e-4  # Slightly higher learning rate
-max_iters = 100      # Fewer iterations needed
-weight_decay = 1e-1
-beta1 = 0.9
-beta2 = 0.95
-grad_clip = 1.0
-
-# learning rate decay settings
-decay_lr = True
-warmup_iters = 100    # Quick warmup
-lr_decay_iters = 5000 # Match max_iters
-min_lr = 3e-5
-
-# DDP settings
-backend = 'nccl'
-
-# system
-device = 'cuda'
-# Note: dtype check is done in train.py
-dtype = 'bfloat16'  # will be validated in train.py
-compile = False 
+# exec configurator
+exec(open('configurator.py').read()) # overrides from command line or config file
 
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
@@ -188,56 +139,60 @@ def get_batch(split):
         ix = torch.randint(len(data) - max_seq_len, (batch_size,))
         x = torch.stack([torch.from_numpy((data[i:i+max_seq_len]).astype(np.int64)) for i in ix])
         y = torch.stack([torch.from_numpy((data[i+1:i+1+max_seq_len]).astype(np.int64)) for i in ix])
+        # For continuous text, create attention mask with all 1s (no padding)
+        attention_mask = torch.ones_like(x)
         if device_type == 'cuda':
             # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-            x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+            x = x.pin_memory().to(device, non_blocking=True)
+            y = y.pin_memory().to(device, non_blocking=True)
+            attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
         else:
-            x, y = x.to(device), y.to(device)
-        return x, y
+            x = x.to(device)
+            y = y.to(device)
+            attention_mask = attention_mask.to(device)
+        return x, y, attention_mask
 
 def get_path_batch(data, split):
     """Get batch for path learning with variable-length sequences."""
-    # For maze path data, we need to reconstruct sequences from the flattened data
-    # We'll sample random starting positions and extract complete sequences
+    # For maze path data, we reconstruct sequences from the flattened data
+    # by splitting on the EOS token.
     
-    # Load metadata to understand the structure
-    meta_path = os.path.join(data_dir, 'meta.pkl')
-    with open(meta_path, 'rb') as f:
-        meta = pickle.load(f)
+    if eos_token_id is None:
+        raise ValueError("get_path_batch is called but eos_token_id is not set. Is meta.pkl present?")
     
-    # Extract sequences by finding sequence boundaries
-    # In our format: [start_node, end_node, start_node, direction, next_node, direction, next_node, ...]
+    if padding_token_id is None:
+        raise ValueError("get_path_batch is called but padding_token_id is not set. Is meta.pkl present?")
+
+    # Find all indices of the newline token
+    # The data is a numpy memmap, so we can use numpy operations on it
+    newline_indices = np.where(data == eos_token_id)[0]
+    
+    # Create sequences by splitting the data array based on the newline token
     sequences = []
-    i = 0
-    max_seq_len = 0
+    start_idx = 0
+    for end_idx in newline_indices:
+        # Extract the sequence, excluding the newline token itself
+        seq = data[start_idx:end_idx].tolist()
+        if seq:  # Avoid adding empty sequences
+            sequences.append(seq)
+        start_idx = end_idx + 1
     
-    while i < len(data) - 2:
-        # Look for sequence pattern: start_node, end_node, start_node
-        start_node = int(data[i])
-        end_node = int(data[i + 1])
-        current_node = int(data[i + 2])
-        
-        if start_node == current_node:  # Valid sequence start
-            seq = [start_node, end_node, current_node]
-            i += 3
-            
-            # Continue reading direction/node pairs until we reach end_node or data ends
-            while i < len(data) - 1:
-                direction = int(data[i])
-                next_node = int(data[i + 1])
-                seq.extend([direction, next_node])
-                i += 2
-                
-                if next_node == end_node:  # Sequence complete
-                    break
-            
-            if len(seq) >= 5:  # Minimum valid sequence
-                sequences.append(seq)
-                max_seq_len = max(max_seq_len, len(seq))
-        else:
-            i += 1
-    
+    # Add the last sequence if the file doesn't end with a newline token
+    if start_idx < len(data):
+        seq = data[start_idx:].tolist()
+        if seq:
+            sequences.append(seq)
+
     # Sample batch_size sequences
+    if not sequences:
+        # This can happen if the newline_token is wrong or data is malformed.
+        # Provide a helpful error message.
+        print(f"Error: No sequences found after splitting by newline_token_id={eos_token_id}.")
+        print("Please ensure your .bin files are correctly formatted with this separator token.")
+        # Fallback to returning empty tensors to avoid crashing the training loop immediately.
+        # The user can then inspect the logs and fix the data.
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.long)
+
     if len(sequences) < batch_size:
         # If we don't have enough sequences, repeat some
         sequences = sequences * ((batch_size // len(sequences)) + 1)
@@ -250,39 +205,52 @@ def get_path_batch(data, split):
         ix = torch.randint(len(data) - max_seq_len, (batch_size,))
         x = torch.stack([torch.from_numpy((data[i:i+max_seq_len]).astype(np.int64)) for i in ix])
         y = torch.stack([torch.from_numpy((data[i+1:i+1+max_seq_len]).astype(np.int64)) for i in ix])
+        # Create attention mask (all 1s for continuous text)
+        attention_mask = torch.ones_like(x)
     else:
         max_len = min(max([len(seq) for seq in sampled_sequences]), max_seq_len)
         
         x_batch = []
         y_batch = []
+        attention_mask_batch = []
         
         for seq in sampled_sequences:
-            # Truncate or pad sequence
+            # Truncate sequence if too long
             if len(seq) > max_len:
                 seq = seq[:max_len]
             
             # Create input (x) and target (y) sequences
-            x_seq = seq[:-1] if len(seq) > 1 else seq + [0]  # Input is all but last token
-            y_seq = seq[1:] if len(seq) > 1 else [0]        # Target is shifted by 1
+            x_seq = seq[:-1] if len(seq) > 1 else seq + [padding_token_id]  # Input is all but last token
+            y_seq = seq[1:] if len(seq) > 1 else [padding_token_id]        # Target is shifted by 1
             
-            # Pad to max_len
+            # Create attention mask (1 for real tokens, 0 for padding)
+            attention_mask_seq = [1] * len(x_seq)
+            
+            # Pad to max_len using the proper padding token
             while len(x_seq) < max_len:
-                x_seq.append(0)  # Pad with 0 (or use a special padding token)
+                x_seq.append(padding_token_id)  # Use proper padding token
+                attention_mask_seq.append(0)    # Mark as padding in attention mask
             while len(y_seq) < max_len:
                 y_seq.append(-1)  # Pad targets with -1 (ignored in loss)
             
             x_batch.append(x_seq[:max_len])
             y_batch.append(y_seq[:max_len])
+            attention_mask_batch.append(attention_mask_seq[:max_len])
         
         x = torch.tensor(x_batch, dtype=torch.long)
         y = torch.tensor(y_batch, dtype=torch.long)
+        attention_mask = torch.tensor(attention_mask_batch, dtype=torch.long)
     
     if device_type == 'cuda':
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        x = x.pin_memory().to(device, non_blocking=True)
+        y = y.pin_memory().to(device, non_blocking=True)
+        attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
     else:
-        x, y = x.to(device), y.to(device)
+        x = x.to(device)
+        y = y.to(device)
+        attention_mask = attention_mask.to(device)
     
-    return x, y
+    return x, y, attention_mask
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -291,11 +259,33 @@ best_val_loss = 1e9
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
 meta_vocab_size = None
+eos_token_id = None
+padding_token_id = None
 if os.path.exists(meta_path):
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
     meta_vocab_size = meta['vocab_size']
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+    # For path data, determine the End-of-Sequence (EOS) token ID
+    if 'stoi' in meta and '\n' in meta['stoi']:
+        eos_token_id = meta['stoi']['\n']
+        print(f"found EOS token ID = {eos_token_id} (from meta['stoi']['\\n'])")
+    elif 'vocab_size' in meta:
+        # Per user instruction, assume the EOS token is the last token in the vocabulary.
+        eos_token_id = meta['vocab_size'] - 1
+        print(f"using EOS token ID = {eos_token_id} (last token in vocab)")
+    
+    # Get padding token ID
+    if 'padding_token_id' in meta:
+        padding_token_id = meta['padding_token_id']
+        print(f"found padding token ID = {padding_token_id} (from meta['padding_token_id'])")
+    elif 'stoi' in meta and '<PAD>' in meta['stoi']:
+        padding_token_id = meta['stoi']['<PAD>']
+        print(f"found padding token ID = {padding_token_id} (from meta['stoi']['<PAD>'])")
+    else:
+        # Fallback: assume padding token is the second-to-last token (before EOS)
+        padding_token_id = meta['vocab_size'] - 2
+        print(f"using padding token ID = {padding_token_id} (fallback: vocab_size - 2)")
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, max_seq_len=max_seq_len,
@@ -370,13 +360,116 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, Y, attention_mask = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, loss = model(input_ids=X, targets=Y, attention_mask=attention_mask)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
     return out
+
+# Complete path generation evaluation on validation set
+@torch.no_grad()
+def evaluate_path_generation_accuracy():
+    """
+    Evaluate the model's ability to generate complete paths correctly.
+    Only uses the first 3 tokens as prompt and checks if the complete generated path matches ground truth.
+    """
+    if not os.path.exists(meta_path):
+        print("No meta.pkl found, skipping path generation evaluation")
+        return 0.0
+    
+    print("Evaluating complete path generation accuracy...")
+    model.eval()
+    
+    # Load validation data
+    val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+    
+    # Extract all complete sequences from validation data
+    sequences = []
+    i = 0
+    
+    while i < len(val_data) - 2:
+        # Look for sequence pattern: start_node, end_node, start_node
+        start_node = int(val_data[i])
+        end_node = int(val_data[i + 1])
+        current_node = int(val_data[i + 2])
+        
+        if start_node == current_node:  # Valid sequence start
+            seq = [start_node, end_node, current_node]
+            i += 3
+            
+            # Continue reading direction/node pairs until we reach end_node or data ends
+            while i < len(val_data) - 1:
+                direction = int(val_data[i])
+                next_node = int(val_data[i + 1])
+                seq.extend([direction, next_node])
+                i += 2
+                
+                if next_node == end_node:  # Sequence complete
+                    break
+            
+            if len(seq) >= 5:  # Minimum valid sequence (start, end, start, direction, node)
+                sequences.append(seq)
+        else:
+            i += 1
+    
+    if not sequences:
+        print("No valid sequences found in validation data")
+        return 0.0
+    
+    print(f"Found {len(sequences)} validation sequences")
+    
+    correct_generations = 0
+    total_attempts = 0
+    
+    for seq in sequences:
+        if len(seq) < 5:  # Need at least 5 tokens for meaningful evaluation
+            continue
+            
+        # Use first 3 tokens as prompt
+        prompt = seq[:3]
+        ground_truth = seq[3:]  # The rest should be generated
+        
+        # Convert to tensor
+        prompt_tensor = torch.tensor(prompt, dtype=torch.long, device=device)[None, ...]
+        
+        # Generate the rest of the sequence
+        max_new_tokens = len(ground_truth) + 10  # Allow some extra tokens in case of errors
+        
+        try:
+            with ctx:
+                generated = model.generate(
+                    input_ids=prompt_tensor, 
+                    max_length=len(prompt) + max_new_tokens,
+                    temperature=0.0,  # Use greedy decoding for deterministic results
+                    do_sample=False,
+                    top_k=1,
+                    eos_token_id=eos_token_id
+                )
+            
+            # Extract only the generated part (excluding prompt)
+            generated_sequence = generated[0][len(prompt):].tolist()
+            
+            # Check if generation matches ground truth
+            # We need exact match for the path to be considered correct
+            if len(generated_sequence) >= len(ground_truth):
+                generated_path = generated_sequence[:len(ground_truth)]
+                if generated_path == ground_truth:
+                    correct_generations += 1
+            
+            total_attempts += 1
+            
+        except Exception as e:
+            print(f"Error generating sequence: {e}")
+            total_attempts += 1
+            continue
+    
+    accuracy = correct_generations / total_attempts if total_attempts > 0 else 0.0
+    print(f"Path Generation Accuracy: {correct_generations}/{total_attempts} = {accuracy:.4f} ({accuracy*100:.2f}%)")
+    
+    model.train()
+    return accuracy
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it):
@@ -398,7 +491,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, Y, attention_mask = get_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -448,10 +541,10 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, loss = model(input_ids=X, targets=Y, attention_mask=attention_mask)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        X, Y, attention_mask = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
@@ -482,6 +575,15 @@ while True:
     # termination conditions
     if iter_num > max_iters:
         break
+
+# Final evaluation: Complete path generation accuracy on validation set
+# if master_process:
+#     print("\n" + "="*50)
+#     print("TRAINING COMPLETED - Running Final Path Generation Evaluation")
+#     print("="*50)
+#     final_accuracy = evaluate_path_generation_accuracy()
+#     print(f"Final Path Generation Accuracy: {final_accuracy:.4f} ({final_accuracy*100:.2f}%)")
+#     print("="*50)
 
 if ddp:
     destroy_process_group()

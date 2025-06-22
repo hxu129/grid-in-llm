@@ -18,12 +18,12 @@ wandb_run_name = 'maze-nav-gpt'
 dataset = 'maze/maze_nav_data'  # This should match your maze data directory
 gradient_accumulation_steps = 1  # Reduced for smaller sequences
 batch_size = 32  # Reasonable batch size for path learning
-max_seq_len = 512  # Maximum sequence length for any path (no artificial limit)
+max_seq_len = 1000000  # Maximum sequence length for any path (no artificial limit)
 
 # model - smaller model suitable for maze navigation
 n_layer = 6   # Fewer layers for simpler task
 n_head = 6    # Fewer attention heads
-n_embd = 192  # Smaller embedding dimension
+n_embd = 126  # Smaller embedding dimension
 dropout = 0.1 # Some dropout for regularization
 bias = False  # Cleaner model
 
@@ -48,4 +48,4 @@ backend = 'nccl'
 device = 'cuda'
 # Note: dtype check is done in train.py
 dtype = 'bfloat16'  # will be validated in train.py
-compile = True 
+compile = False  # False for safer inference, can be overridden 

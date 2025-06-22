@@ -89,7 +89,7 @@ class CausalSelfAttention(nn.Module):
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
 
-    def forward(self, x):
+    def forward(self, x, attention_mask=None):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -101,18 +101,59 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         attn_weights_to_return = None
         if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, 
-                                                                 dropout_p=self.dropout if self.training else 0, 
-                                                                 is_causal=True)
-            # Note: Flash attention doesn't return attention weights for efficiency
-            attn_weights_to_return = None
+            # For flash attention, we need to create a combined mask
+            if attention_mask is not None:
+                # Convert attention_mask to boolean and expand
+                attention_mask = attention_mask.bool()  # Ensure boolean type
+                # attention_mask: (B, T) where 1 = attend, 0 = don't attend
+                # We need to expand it to (B, 1, T, T) and combine with causal mask
+                attn_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)
+                attn_mask = attn_mask.expand(B, 1, T, T)  # (B, 1, T, T)
+                
+                # Create causal mask
+                causal_mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+                causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
+                
+                # Combine masks: both causal and attention mask must be True
+                combined_mask = attn_mask & causal_mask
+                
+                # Flash attention expects None for causal, so we'll use the manual implementation
+                # when we have attention masks
+                att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+                att = att.masked_fill(~combined_mask, float('-inf'))
+                att = F.softmax(att, dim=-1)
+                attn_weights_to_return = att
+                att = self.attn_dropout(att)
+                y = att @ v
+            else:
+                # No attention mask, use flash attention with causal mask
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, 
+                                                                     dropout_p=self.dropout if self.training else 0, 
+                                                                     is_causal=True)
+                attn_weights_to_return = None
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            # Create causal mask dynamically based on sequence length
+            
+            # Create causal mask
             causal_mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
-            att = att.masked_fill(~causal_mask, float('-inf'))
+            
+            # Apply attention mask if provided
+            if attention_mask is not None:
+                # Convert attention_mask to boolean type
+                attention_mask = attention_mask.bool()  # Ensure boolean type
+                # attention_mask: (B, T) where 1 = attend, 0 = don't attend
+                # Convert to (B, 1, T, T) format for broadcasting
+                attn_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)
+                attn_mask = attn_mask.expand(B, self.n_head, T, T)  # (B, nh, T, T)
+                
+                # Combine with causal mask
+                combined_mask = causal_mask.unsqueeze(0).unsqueeze(0) & attn_mask
+                att = att.masked_fill(~combined_mask, float('-inf'))
+            else:
+                # Only causal mask
+                att = att.masked_fill(~causal_mask, float('-inf'))
+                
             att = F.softmax(att, dim=-1)
             attn_weights_to_return = att
             att = self.attn_dropout(att)
@@ -148,8 +189,8 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd, elementwise_affine=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        y, attn_weights = self.attn(self.ln_1(x))
+    def forward(self, x, attention_mask=None):
+        y, attn_weights = self.attn(self.ln_1(x), attention_mask=attention_mask)
         x = x + y
         x = x + self.mlp(self.ln_2(x))
         return x, attn_weights
@@ -234,7 +275,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, input_ids=None, inputs_embeds=None, targets=None, return_dict=False, **kwargs):
+    def forward(self, input_ids=None, inputs_embeds=None, targets=None, attention_mask=None, return_dict=False, **kwargs):
         """
         Forward pass with HuggingFace-style arguments.
         
@@ -242,6 +283,7 @@ class GPT(nn.Module):
             input_ids: Token IDs of shape (batch_size, sequence_length)
             inputs_embeds: Pre-computed embeddings of shape (batch_size, sequence_length, hidden_size)
             targets: Target token IDs for loss computation
+            attention_mask: Mask to avoid performing attention on padding token indices
             return_dict: Whether to return a structured output
         """
         # Handle both input_ids and inputs_embeds (HuggingFace convention)
@@ -262,9 +304,6 @@ class GPT(nn.Module):
         else:
             raise ValueError("You must specify either input_ids or inputs_embeds")
         
-        # Note: attention_mask is accepted but not used since this is a causal model
-        # that generates its own causal mask internally
-        
         all_hidden_states = [] if return_dict else None
         all_attentions = [] if return_dict else None
         
@@ -280,7 +319,7 @@ class GPT(nn.Module):
             all_hidden_states.append(x)
 
         for block in self.transformer.h:
-            x, attn_weights = block(x)
+            x, attn_weights = block(x, attention_mask=attention_mask)
             if return_dict:
                 all_hidden_states.append(x)
                 all_attentions.append(attn_weights)
@@ -411,7 +450,7 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, input_ids=None, max_length=None,
                  temperature=1.0, do_sample=False, top_k=None, 
-                 return_dict_in_generate=False, **generate_kwargs):
+                 return_dict_in_generate=False, eos_token_id=None, **generate_kwargs):
         """
         Generate text with HuggingFace-compatible interface.
         
@@ -461,10 +500,15 @@ class GPT(nn.Module):
             else:
                 _, input_ids_next = torch.topk(probs, k=1, dim=-1)
 
-            # append sampled index to the running sequence and continue
-            input_ids = torch.cat((input_ids, input_ids_next), dim=1)
-            if input_ids_next == input_ids[:, 1]: # specially designed for solving maze
+            if eos_token_id is not None:
+                if input_ids_next == eos_token_id:
+                    break
+            elif input_ids_next == input_ids[:, 1]: # specially designed for solving maze
+                input_ids = torch.cat((input_ids, input_ids_next), dim=1)
                 break
+            else:
+                # append sampled index to the running sequence and continue
+                input_ids = torch.cat((input_ids, input_ids_next), dim=1)
 
         if return_dict_in_generate:
             return DecoderOnlyOutput(
