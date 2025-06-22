@@ -2,6 +2,10 @@
 This training script can be run both on a single gpu in debug mode,
 and also in a larger training run with distributed data parallel (ddp).
 
+TRAINING MODIFICATION: The model is trained with a modified loss function that skips
+predicting the 2nd and 3rd tokens. In inference, the first 3 tokens will be provided
+as prompt, and the model only needs to predict from the 4th token onwards.
+
 To run on a single GPU, example:
 $ python train.py --batch_size=32 --compile=False
 
@@ -139,6 +143,11 @@ def get_batch(split):
         ix = torch.randint(len(data) - max_seq_len, (batch_size,))
         x = torch.stack([torch.from_numpy((data[i:i+max_seq_len]).astype(np.int64)) for i in ix])
         y = torch.stack([torch.from_numpy((data[i+1:i+1+max_seq_len]).astype(np.int64)) for i in ix])
+        
+        # Modify targets: don't compute loss for first 2 positions (predicting tokens 2 and 3)
+        # Set first 2 positions to -1 which will be ignored by cross_entropy
+        y[:, :2] = -1
+        
         # For continuous text, create attention mask with all 1s (no padding)
         attention_mask = torch.ones_like(x)
         if device_type == 'cuda':
@@ -205,6 +214,11 @@ def get_path_batch(data, split):
         ix = torch.randint(len(data) - max_seq_len, (batch_size,))
         x = torch.stack([torch.from_numpy((data[i:i+max_seq_len]).astype(np.int64)) for i in ix])
         y = torch.stack([torch.from_numpy((data[i+1:i+1+max_seq_len]).astype(np.int64)) for i in ix])
+        
+        # Modify targets: don't compute loss for first 2 positions (predicting tokens 2 and 3)
+        # Set first 2 positions to -1 which will be ignored by cross_entropy
+        y[:, :2] = -1
+        
         # Create attention mask (all 1s for continuous text)
         attention_mask = torch.ones_like(x)
     else:
@@ -232,6 +246,13 @@ def get_path_batch(data, split):
                 attention_mask_seq.append(0)    # Mark as padding in attention mask
             while len(y_seq) < max_len:
                 y_seq.append(-1)  # Pad targets with -1 (ignored in loss)
+            
+            # Modify targets: don't compute loss for first 2 positions (predicting tokens 2 and 3)
+            # Set first 2 positions to -1 which will be ignored by cross_entropy
+            if len(y_seq) > 0:
+                y_seq[0] = -1
+            if len(y_seq) > 1:
+                y_seq[1] = -1
             
             x_batch.append(x_seq[:max_len])
             y_batch.append(y_seq[:max_len])
@@ -368,108 +389,13 @@ def estimate_loss():
     model.train()
     return out
 
-# Complete path generation evaluation on validation set
-@torch.no_grad()
-def evaluate_path_generation_accuracy():
-    """
-    Evaluate the model's ability to generate complete paths correctly.
-    Only uses the first 3 tokens as prompt and checks if the complete generated path matches ground truth.
-    """
-    if not os.path.exists(meta_path):
-        print("No meta.pkl found, skipping path generation evaluation")
-        return 0.0
-    
-    print("Evaluating complete path generation accuracy...")
-    model.eval()
-    
-    # Load validation data
-    val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    
-    # Extract all complete sequences from validation data
-    sequences = []
-    i = 0
-    
-    while i < len(val_data) - 2:
-        # Look for sequence pattern: start_node, end_node, start_node
-        start_node = int(val_data[i])
-        end_node = int(val_data[i + 1])
-        current_node = int(val_data[i + 2])
-        
-        if start_node == current_node:  # Valid sequence start
-            seq = [start_node, end_node, current_node]
-            i += 3
-            
-            # Continue reading direction/node pairs until we reach end_node or data ends
-            while i < len(val_data) - 1:
-                direction = int(val_data[i])
-                next_node = int(val_data[i + 1])
-                seq.extend([direction, next_node])
-                i += 2
-                
-                if next_node == end_node:  # Sequence complete
-                    break
-            
-            if len(seq) >= 5:  # Minimum valid sequence (start, end, start, direction, node)
-                sequences.append(seq)
-        else:
-            i += 1
-    
-    if not sequences:
-        print("No valid sequences found in validation data")
-        return 0.0
-    
-    print(f"Found {len(sequences)} validation sequences")
-    
-    correct_generations = 0
-    total_attempts = 0
-    
-    for seq in sequences:
-        if len(seq) < 5:  # Need at least 5 tokens for meaningful evaluation
-            continue
-            
-        # Use first 3 tokens as prompt
-        prompt = seq[:3]
-        ground_truth = seq[3:]  # The rest should be generated
-        
-        # Convert to tensor
-        prompt_tensor = torch.tensor(prompt, dtype=torch.long, device=device)[None, ...]
-        
-        # Generate the rest of the sequence
-        max_new_tokens = len(ground_truth) + 10  # Allow some extra tokens in case of errors
-        
-        try:
-            with ctx:
-                generated = model.generate(
-                    input_ids=prompt_tensor, 
-                    max_length=len(prompt) + max_new_tokens,
-                    temperature=0.0,  # Use greedy decoding for deterministic results
-                    do_sample=False,
-                    top_k=1,
-                    eos_token_id=eos_token_id
-                )
-            
-            # Extract only the generated part (excluding prompt)
-            generated_sequence = generated[0][len(prompt):].tolist()
-            
-            # Check if generation matches ground truth
-            # We need exact match for the path to be considered correct
-            if len(generated_sequence) >= len(ground_truth):
-                generated_path = generated_sequence[:len(ground_truth)]
-                if generated_path == ground_truth:
-                    correct_generations += 1
-            
-            total_attempts += 1
-            
-        except Exception as e:
-            print(f"Error generating sequence: {e}")
-            total_attempts += 1
-            continue
-    
-    accuracy = correct_generations / total_attempts if total_attempts > 0 else 0.0
-    print(f"Path Generation Accuracy: {correct_generations}/{total_attempts} = {accuracy:.4f} ({accuracy*100:.2f}%)")
-    
-    model.train()
-    return accuracy
+# Import the new evaluation module
+try:
+    from evaluate_maze_nav import evaluate_maze_model
+    MAZE_EVAL_AVAILABLE = True
+except ImportError:
+    MAZE_EVAL_AVAILABLE = False
+    print("Warning: Maze evaluation module not available. Skipping path generation evaluation.")
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it):
@@ -576,14 +502,37 @@ while True:
     if iter_num > max_iters:
         break
 
-# Final evaluation: Complete path generation accuracy on validation set
-# if master_process:
-#     print("\n" + "="*50)
-#     print("TRAINING COMPLETED - Running Final Path Generation Evaluation")
-#     print("="*50)
-#     final_accuracy = evaluate_path_generation_accuracy()
-#     print(f"Final Path Generation Accuracy: {final_accuracy:.4f} ({final_accuracy*100:.2f}%)")
-#     print("="*50)
+# Run comprehensive maze navigation evaluation at the end of training
+if master_process and MAZE_EVAL_AVAILABLE and os.path.exists(meta_path):
+    print("\n" + "="*60)
+    print("TRAINING COMPLETED - Running Final Maze Navigation Evaluation")
+    print("="*60)
+    try:
+        final_maze_results = evaluate_maze_model(
+            model=raw_model, 
+            data_dir=data_dir, 
+            device=device, 
+            ctx=ctx,
+            max_sequences=2000  # Use more sequences for final comprehensive evaluation
+        )
+        
+        # Log final results to wandb if enabled
+        if wandb_log:
+            final_log_dict = {
+                "final_eval/next_step_accuracy": final_maze_results.get('next_step_accuracy', 0.0),
+                "final_eval/exact_match_rate": final_maze_results.get('exact_match_rate', 0.0),
+                "final_eval/valid_completion_rate": final_maze_results.get('valid_completion_rate', 0.0),
+                "final_eval/path_validity_rate": final_maze_results.get('path_validity_rate', 0.0),
+                "final_eval/total_attempts": final_maze_results.get('total_attempts', 0),
+                "final_eval/iter_num": iter_num
+            }
+            wandb.log(final_log_dict)
+            
+        print("\nFinal maze navigation evaluation completed!")
+        print("="*60)
+        
+    except Exception as e:
+        print(f"Error in final maze evaluation: {e}")
 
 if ddp:
     destroy_process_group()
