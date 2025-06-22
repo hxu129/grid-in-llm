@@ -342,7 +342,7 @@ class MazeNavDataGenerator:
 def main():
     """Generate maze navigation training data."""
     config = MazeNavConfig(
-        maze_size=5,
+        maze_size=8,
         seed=41,
         output_dir="maze_nav_data",
         max_pairs=10000000, 

@@ -502,37 +502,37 @@ while True:
     if iter_num > max_iters:
         break
 
-# Run comprehensive maze navigation evaluation at the end of training
-if master_process and MAZE_EVAL_AVAILABLE and os.path.exists(meta_path):
-    print("\n" + "="*60)
-    print("TRAINING COMPLETED - Running Final Maze Navigation Evaluation")
-    print("="*60)
-    try:
-        final_maze_results = evaluate_maze_model(
-            model=raw_model, 
-            data_dir=data_dir, 
-            device=device, 
-            ctx=ctx,
-            max_sequences=2000  # Use more sequences for final comprehensive evaluation
-        )
+# # Run comprehensive maze navigation evaluation at the end of training
+# if master_process and MAZE_EVAL_AVAILABLE and os.path.exists(meta_path):
+#     print("\n" + "="*60)
+#     print("TRAINING COMPLETED - Running Final Maze Navigation Evaluation")
+#     print("="*60)
+#     try:
+#         final_maze_results = evaluate_maze_model(
+#             model=raw_model, 
+#             data_dir=data_dir, 
+#             device=device, 
+#             ctx=ctx,
+#             max_sequences=2000  # Use more sequences for final comprehensive evaluation
+#         )
         
-        # Log final results to wandb if enabled
-        if wandb_log:
-            final_log_dict = {
-                "final_eval/next_step_accuracy": final_maze_results.get('next_step_accuracy', 0.0),
-                "final_eval/exact_match_rate": final_maze_results.get('exact_match_rate', 0.0),
-                "final_eval/valid_completion_rate": final_maze_results.get('valid_completion_rate', 0.0),
-                "final_eval/path_validity_rate": final_maze_results.get('path_validity_rate', 0.0),
-                "final_eval/total_attempts": final_maze_results.get('total_attempts', 0),
-                "final_eval/iter_num": iter_num
-            }
-            wandb.log(final_log_dict)
+#         # Log final results to wandb if enabled
+#         if wandb_log:
+#             final_log_dict = {
+#                 "final_eval/next_step_accuracy": final_maze_results.get('next_step_accuracy', 0.0),
+#                 "final_eval/exact_match_rate": final_maze_results.get('exact_match_rate', 0.0),
+#                 "final_eval/valid_completion_rate": final_maze_results.get('valid_completion_rate', 0.0),
+#                 "final_eval/path_validity_rate": final_maze_results.get('path_validity_rate', 0.0),
+#                 "final_eval/total_attempts": final_maze_results.get('total_attempts', 0),
+#                 "final_eval/iter_num": iter_num
+#             }
+#             wandb.log(final_log_dict)
             
-        print("\nFinal maze navigation evaluation completed!")
-        print("="*60)
+#         print("\nFinal maze navigation evaluation completed!")
+#         print("="*60)
         
-    except Exception as e:
-        print(f"Error in final maze evaluation: {e}")
+#     except Exception as e:
+#         print(f"Error in final maze evaluation: {e}")
 
 if ddp:
     destroy_process_group()

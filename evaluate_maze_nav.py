@@ -232,7 +232,8 @@ class MazeNavEvaluator:
                 
             # Use first 3 tokens as prompt [start, end, start]
             prompt = seq[:3]
-            ground_truth = seq[3:]
+            ground_truth_completion = seq[3:]  # Only the part after prompt
+            original_sequence = seq  # Complete original sequence for comparison
             
             prompt_tensor = torch.tensor(prompt, dtype=torch.long, device=self.device)[None, ...]
             
@@ -253,18 +254,30 @@ class MazeNavEvaluator:
                 
                 total_attempts += 1
                 
-                # Check exact match
-                if generated_tokens == ground_truth:
+                # Create complete generated sequence
+                complete_generated_sequence = prompt + generated_tokens
+                
+                # Debug information for first few sequences
+                if total_attempts <= 3:
+                    print(f"\nDebug - Sequence {total_attempts}:")
+                    print(f"  Original sequence: {original_sequence}")
+                    print(f"  Prompt: {prompt}")
+                    print(f"  Generated tokens: {generated_tokens}")
+                    print(f"  Complete generated: {complete_generated_sequence}")
+                    print(f"  Match: {complete_generated_sequence == original_sequence}")
+                
+                # Check exact match with original sequence
+                if complete_generated_sequence == original_sequence:
                     exact_matches += 1
                     valid_completions += 1
                     path_validity_matches += 1
                 else:
                     # Check if generated path is valid (reaches the target)
-                    if self._is_valid_path_completion(prompt + generated_tokens):
+                    if self._is_valid_path_completion(complete_generated_sequence):
                         valid_completions += 1
                         
                     # Check if the path reaches the correct end node
-                    if self._reaches_target_node(prompt + generated_tokens):
+                    if self._reaches_target_node(complete_generated_sequence):
                         path_validity_matches += 1
                         
             except Exception as e:
