@@ -33,6 +33,10 @@ def find_representative_neurons_and_save_images(matrices: dict, grid_size: int,
     """
     print(f"\nFinding representative neurons for each position...")
     
+    # Create grid-size specific directory
+    grid_base_dir = f"grid_{grid_size}x{grid_size}"
+    save_dir = os.path.join(grid_base_dir, save_dir)
+    
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     
@@ -131,13 +135,19 @@ def run_complete_analysis(max_samples: int = 100,
         skip_visualization: Skip visualization step
     """
     
-    results_file = "ffn_position_analysis_results.npz"
+    # Create grid-size specific directory for all outputs
+    grid_base_dir = f"grid_{grid_size}x{grid_size}"
+    if not os.path.exists(grid_base_dir):
+        os.makedirs(grid_base_dir)
+    
+    results_file = os.path.join(grid_base_dir, "ffn_position_analysis_results.npz")
     
     print("="*80)
     print("FFN POSITION ANALYSIS PIPELINE")
     print("="*80)
     print(f"Model: {model_path}")
     print(f"Grid size: {grid_size}x{grid_size}")
+    print(f"Output directory: {grid_base_dir}/")
     print(f"Max samples: {max_samples}")
     print(f"Completion length: {completion_length}")
     print(f"Normalization: {normalization}")
@@ -182,7 +192,14 @@ def run_complete_analysis(max_samples: int = 100,
         print("-" * 40)
         
         try:
+            # Change working directory temporarily for visualization
+            original_cwd = os.getcwd()
+            os.chdir(grid_base_dir)
+            
             results = visualize_main()
+            
+            # Change back to original directory
+            os.chdir(original_cwd)
             print("✓ Visualization complete!")
             
         except Exception as e:
@@ -223,9 +240,9 @@ def run_complete_analysis(max_samples: int = 100,
     print("ANALYSIS COMPLETE!")
     print("="*80)
     print(f"Results saved in: {results_file}")
-    print("Visualizations saved in: ffn_visualizations/")
+    print(f"Visualizations saved in: {os.path.join(grid_base_dir, 'ffn_visualizations')}/")
     if save_representative_neurons:
-        print("Representative neurons saved in: representative_neurons/")
+        print(f"Representative neurons saved in: {os.path.join(grid_base_dir, 'representative_neurons')}/")
     print()
     print("To load results later:")
     print(f"  import numpy as np")

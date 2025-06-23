@@ -108,7 +108,7 @@ class FFNActivationCollector:
                             max_samples: int = 100) -> List[List[int]]:
         """Load validation data following logit_lens.ipynb pattern."""
         if val_path is None:
-            val_path = os.path.join(self.project_root, "data", "maze", "maze_nav_data", "val.bin")
+            val_path = os.path.join(self.project_root, "data", "maze", "maze_nav_data", f"train_{self.grid_size}.bin")
         val = np.memmap(val_path, dtype=np.uint16, mode="r")
         
         # Parse validation data into individual paths
