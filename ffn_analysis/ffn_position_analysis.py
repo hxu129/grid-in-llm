@@ -115,7 +115,7 @@ class FFNActivationCollector:
         data = []
         temp = []
         for d in val:
-            if d == 8 ** 2 + 4:  # End of sequence marker
+            if d == self.grid_size ** 2 + 4:  # End of sequence marker
                 if temp:
                     data.append(temp)
                 temp = []
@@ -295,7 +295,7 @@ class FFNActivationCollector:
                                     pass
                                 
                                 # Prevent sequences from getting too long
-                                if current_input.size(1) > 100:
+                                if current_input.size(1) > self.grid_size * 2:
                                     break
                                     
                             except Exception as e:
