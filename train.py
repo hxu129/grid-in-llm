@@ -125,13 +125,14 @@ data_dir = os.path.join('data', dataset)
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+    global maze_size
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, f'train_{maze_size}.bin'), dtype=np.uint16, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, f'val_{maze_size}.bin'), dtype=np.uint16, mode='r')
     
     # Check if this is path data by looking for meta.pkl
-    meta_path = os.path.join(data_dir, 'meta.pkl')
+    meta_path = os.path.join(data_dir, f'meta_{maze_size}.pkl')
     is_path_data = os.path.exists(meta_path)
     
     if is_path_data:
@@ -278,7 +279,7 @@ iter_num = 0
 best_val_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
-meta_path = os.path.join(data_dir, 'meta.pkl')
+meta_path = os.path.join(data_dir, f'meta_{maze_size}.pkl')
 meta_vocab_size = None
 eos_token_id = None
 padding_token_id = None
