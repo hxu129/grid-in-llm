@@ -13,3 +13,6 @@ venv/
 
 data/maze/maze_nav_data
 open-source-library/
+
+*.png
+*.npz
