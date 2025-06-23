@@ -11,20 +11,20 @@ eval_only = False
 always_save_checkpoint = True
 
 # wandb logging
-wandb_log = False
+wandb_log = True
 wandb_project = 'maze-nav'
 wandb_run_name = 'maze-nav-gpt'
 
 # data
 dataset = 'maze/maze_nav_data'  # This should match your maze data directory
 gradient_accumulation_steps = 1  # Must be divisible by number of GPUs for DDP
-batch_size = 32  # Reasonable batch size for path learning
-max_seq_len = 1000000  # Maximum sequence length for any path (no artificial limit)
+batch_size = 16  # Reduced batch size for safety
+max_seq_len = 1000  # Reasonable maximum sequence length for maze paths
 
 # model - smaller model suitable for maze navigation
-n_layer = 6   # Fewer layers for simpler task
-n_head = 6    # Fewer attention heads
-n_embd = 126  # Smaller embedding dimension
+n_layer = 1   # Fewer layers for simpler task
+n_head = 1    # Fewer attention heads
+n_embd = 16  # Smaller embedding dimension
 dropout = 0.1 # Some dropout for regularization
 bias = False  # Cleaner model
 
@@ -46,7 +46,7 @@ min_lr = 3e-5
 backend = 'nccl'
 
 # system
-device = 'cuda:1'
+device = 'cuda'
 # Note: dtype check is done in train.py
 dtype = 'bfloat16'  # will be validated in train.py
 compile = False  # False for safer inference, can be overridden 

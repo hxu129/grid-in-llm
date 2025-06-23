@@ -10,7 +10,7 @@ def plot_neuron_heatmaps(
     grid_size: Optional[int] = None,
     figsize: Optional[Tuple[int, int]] = None,
     cols: int = 4,
-    cmap: str = 'viridis',
+    cmap: str = 'RdYlBu_r',
     save_path: Optional[str] = None,
     title_prefix: str = "Neuron",
     show_colorbar: bool = True,
@@ -146,7 +146,7 @@ def plot_single_neuron_heatmap(
     neuron_idx: int,
     grid_size: Optional[int] = None,
     figsize: Tuple[int, int] = (8, 6),
-    cmap: str = 'viridis',
+    cmap: str = 'RdYlBu_r',
     title: Optional[str] = None,
     save_path: Optional[str] = None
 ) -> plt.Figure:
@@ -257,7 +257,7 @@ def example_usage():
         activations,
         cols=3,
         title_prefix="Example Neuron",
-        cmap='plasma'
+        cmap='RdYlBu_r'
     )
     plt.show()
     

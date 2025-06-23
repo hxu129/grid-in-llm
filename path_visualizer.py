@@ -16,17 +16,18 @@ from typing import List, Dict, Tuple, Optional, Union
 class PathVisualizer:
     """Visualizes generated paths on maze grids."""
     
-    def __init__(self, maze_data_dir: str = "data/maze/maze_nav_data"):
+    def __init__(self, maze_size: int = 15, maze_data_dir: str = "data/maze/maze_nav_data"):
         """
         Initialize the path visualizer.
         
         Args:
+            maze_size: Size of the maze (e.g., 8, 12, 15, 20)
             maze_data_dir: Directory containing maze data files
         """
         self.maze_data_dir = maze_data_dir
+        self.maze_size = maze_size
         self.maze_data = None
         self.meta = None
-        self.maze_size = None
         
         # Load maze data and metadata
         self._load_maze_data()
@@ -43,25 +44,112 @@ class PathVisualizer:
         }
     
     def _load_maze_data(self):
-        """Load maze data and metadata from files."""
+        """Load maze data and metadata from files based on maze size."""
         try:
+            # First, check if we have size-specific files
+            meta_filename = f'meta_{self.maze_size}.pkl'
+            meta_path = os.path.join(self.maze_data_dir, meta_filename)
+            dataset_filename = f'maze_nav_dataset_{self.maze_size}.json'
+            dataset_path = os.path.join(self.maze_data_dir, dataset_filename)
+            
+            # If we don't have both size-specific files, try generation or fallback
+            if not (os.path.exists(meta_path) and os.path.exists(dataset_path)):
+                print(f"Size-specific files not found for {self.maze_size}x{self.maze_size} maze.")
+                
+                # Check if we have the exact meta file for this size
+                if os.path.exists(meta_path):
+                    print(f"Found meta file for {self.maze_size}x{self.maze_size}, generating maze data...")
+                    self._generate_maze_data()
+                    return
+                else:
+                    # Try to find any available meta file and warn about fallback
+                    available_meta = []
+                    if os.path.exists(self.maze_data_dir):
+                        available_meta = [f for f in os.listdir(self.maze_data_dir) if f.startswith('meta_') and f.endswith('.pkl')]
+                    
+                    if available_meta:
+                        print(f"No meta file found for size {self.maze_size}. Available sizes: {[f.split('_')[1].split('.')[0] for f in available_meta]}")
+                        print("Generating new maze data...")
+                        self._generate_maze_data()
+                        return
+                    else:
+                        # Fall back to default files
+                        print(f"No size-specific files found. Trying default files...")
+                        meta_path = os.path.join(self.maze_data_dir, 'meta.pkl')
+                        dataset_path = os.path.join(self.maze_data_dir, 'maze_nav_dataset.json')
+            
             # Load metadata
-            meta_path = os.path.join(self.maze_data_dir, 'meta.pkl')
+            if not os.path.exists(meta_path):
+                raise FileNotFoundError(f"No meta file found at {meta_path}")
+                
             with open(meta_path, 'rb') as f:
                 self.meta = pickle.load(f)
             
-            # Load maze dataset
-            dataset_path = os.path.join(self.maze_data_dir, 'maze_nav_dataset.json')
+            # Check if the loaded meta matches our desired maze size
+            if 'config' in self.meta and 'maze_size' in self.meta['config']:
+                loaded_size = self.meta['config']['maze_size']
+                if loaded_size != self.maze_size:
+                    print(f"Note: Meta file contains {loaded_size}x{loaded_size} maze, but {self.maze_size}x{self.maze_size} was requested.")
+                    print("Generating new maze data for the requested size...")
+                    self._generate_maze_data()
+                    return
+            
+            # Load dataset
+            if not os.path.exists(dataset_path):
+                print(f"Dataset file not found. Generating maze data for {self.maze_size}x{self.maze_size}...")
+                self._generate_maze_data()
+                return
+                
             with open(dataset_path, 'r') as f:
                 dataset = json.load(f)
                 self.maze_data = dataset['maze_data']
-                self.maze_size = dataset['config']['maze_size']
+                
+                # Verify the dataset matches our maze size
+                if 'config' in dataset and 'maze_size' in dataset['config']:
+                    dataset_size = dataset['config']['maze_size']
+                    if dataset_size != self.maze_size:
+                        print(f"Dataset contains {dataset_size}x{dataset_size} maze, but {self.maze_size}x{self.maze_size} was requested.")
+                        print("Generating new maze data for the requested size...")
+                        self._generate_maze_data()
+                        return
             
             print(f"Loaded maze data: {self.maze_size}x{self.maze_size} maze with {self.maze_data['num_nodes']} nodes")
             
         except Exception as e:
-            print(f"Error loading maze data: {e}")
-            print("Please ensure maze data files exist in the specified directory.")
+            print(f"Error loading maze data for size {self.maze_size}: {e}")
+            print("Attempting to generate maze data on-the-fly...")
+            try:
+                self._generate_maze_data()
+            except Exception as gen_error:
+                print(f"Failed to generate maze data: {gen_error}")
+                raise RuntimeError(f"Could not load or generate maze data for size {self.maze_size}")
+    
+    def _generate_maze_data(self):
+        """Generate maze data on-the-fly for the specified size."""
+        try:
+            # Import the maze generation modules
+            import sys
+            maze_module_path = os.path.join(os.path.dirname(self.maze_data_dir), '.')
+            if maze_module_path not in sys.path:
+                sys.path.insert(0, maze_module_path)
+            
+            from maze_nav import MazeNavDataGenerator, MazeNavConfig
+            
+            # Generate maze data
+            config = MazeNavConfig(maze_size=self.maze_size, seed=42, max_pairs=100)  # Limited pairs for visualization
+            generator = MazeNavDataGenerator(config)
+            dataset = generator.generate_data()
+            
+            # Extract maze data
+            self.maze_data = dataset['maze_data']
+            
+            print(f"Generated maze data: {self.maze_size}x{self.maze_size} maze with {self.maze_data['num_nodes']} nodes")
+            
+        except ImportError as e:
+            raise ImportError(f"Could not import maze generation modules: {e}. "
+                            f"Please ensure the maze modules are available.")
+        except Exception as e:
+            raise RuntimeError(f"Failed to generate maze data: {e}")
     
     def parse_generated_path(self, path_string: str, skip_first_n: int = 2) -> Tuple[List[int], List[str]]:
         """
@@ -303,6 +391,7 @@ class PathVisualizer:
 
 # Example usage and utility functions
 def visualize_generated_path(path_string: str, 
+                           maze_size: int = 15,
                            maze_data_dir: str = "data/maze/maze_nav_data",
                            title: str = None,
                            save_path: str = None,
@@ -312,12 +401,13 @@ def visualize_generated_path(path_string: str,
     
     Args:
         path_string: Generated path string from the model
+        maze_size: Size of the maze (e.g., 8, 12, 15, 20)
         maze_data_dir: Directory containing maze data
         title: Optional title for the plot
         save_path: Optional path to save the figure
         show_node_labels: Whether to show node ID labels on each grid cell
     """
-    visualizer = PathVisualizer(maze_data_dir)
+    visualizer = PathVisualizer(maze_size=maze_size, maze_data_dir=maze_data_dir)
     return visualizer.visualize_path(path_string, title=title, save_path=save_path, 
                                    show_node_labels=show_node_labels)
 
@@ -326,10 +416,33 @@ if __name__ == "__main__":
     # Example usage
     example_path = "19 28 19 left 18 left 17 down 27 down 37 left 36 up 26 up 16 up 6 left 5"
     
-    visualizer = PathVisualizer()
+    # Example with default 15x15 maze
+    visualizer = PathVisualizer(maze_size=15)
     visualizer.visualize_path(
         example_path,
-        title="Example Generated Path",
-        save_path="example_path_visualization.png",
+        title="Example Generated Path (15x15 Maze)",
+        save_path="example_path_visualization_15x15.png",
+        show_node_labels=True
+    )
+    
+    # Example with 8x8 maze
+    try:
+        visualizer_8x8 = PathVisualizer(maze_size=8)
+        # You would use a path appropriate for 8x8 maze here
+        example_path_8x8 = "0 right 1 down 9 right 10"  # Example for 8x8
+        visualizer_8x8.visualize_path(
+            example_path_8x8,
+            title="Example Generated Path (8x8 Maze)",
+            save_path="example_path_visualization_8x8.png",
+            show_node_labels=True
+        )
+    except Exception as e:
+        print(f"Could not visualize 8x8 maze: {e}")
+    
+    # Using the convenience function
+    visualize_generated_path(
+        example_path,
+        maze_size=15,
+        title="Using Convenience Function",
         show_node_labels=True
     ) 
