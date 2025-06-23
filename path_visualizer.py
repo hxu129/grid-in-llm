@@ -16,7 +16,7 @@ from typing import List, Dict, Tuple, Optional, Union
 class PathVisualizer:
     """Visualizes generated paths on maze grids."""
     
-    def __init__(self, maze_data_dir: str = "data/maze/maze_nav_data"):
+    def __init__(self, maze_size, maze_data_dir: str = "data/maze/maze_nav_data"):
         """
         Initialize the path visualizer.
         
@@ -26,7 +26,7 @@ class PathVisualizer:
         self.maze_data_dir = maze_data_dir
         self.maze_data = None
         self.meta = None
-        self.maze_size = None
+        self.maze_size = maze_size
         
         # Load maze data and metadata
         self._load_maze_data()
@@ -46,16 +46,15 @@ class PathVisualizer:
         """Load maze data and metadata from files."""
         try:
             # Load metadata
-            meta_path = os.path.join(self.maze_data_dir, 'meta.pkl')
+            meta_path = os.path.join(self.maze_data_dir, f'meta_{self.maze_size}.pkl')
             with open(meta_path, 'rb') as f:
                 self.meta = pickle.load(f)
             
             # Load maze dataset
-            dataset_path = os.path.join(self.maze_data_dir, 'maze_nav_dataset.json')
+            dataset_path = os.path.join(self.maze_data_dir, f'maze_nav_dataset_{self.maze_size}.json')
             with open(dataset_path, 'r') as f:
                 dataset = json.load(f)
                 self.maze_data = dataset['maze_data']
-                self.maze_size = dataset['config']['maze_size']
             
             print(f"Loaded maze data: {self.maze_size}x{self.maze_size} maze with {self.maze_data['num_nodes']} nodes")
             
@@ -303,6 +302,7 @@ class PathVisualizer:
 
 # Example usage and utility functions
 def visualize_generated_path(path_string: str, 
+                           maze_size: int,
                            maze_data_dir: str = "data/maze/maze_nav_data",
                            title: str = None,
                            save_path: str = None,
@@ -317,7 +317,7 @@ def visualize_generated_path(path_string: str,
         save_path: Optional path to save the figure
         show_node_labels: Whether to show node ID labels on each grid cell
     """
-    visualizer = PathVisualizer(maze_data_dir)
+    visualizer = PathVisualizer(maze_size, maze_data_dir)
     return visualizer.visualize_path(path_string, title=title, save_path=save_path, 
                                    show_node_labels=show_node_labels)
 
