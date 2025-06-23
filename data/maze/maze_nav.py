@@ -223,7 +223,7 @@ class MazeNavDataGenerator:
         os.makedirs(self.config.output_dir, exist_ok=True)
         
         # Save main dataset
-        with open(os.path.join(self.config.output_dir, "maze_nav_dataset.json"), 'w') as f:
+        with open(os.path.join(self.config.output_dir, f"maze_nav_dataset_{self.config.maze_size}.json"), 'w') as f:
             json.dump(dataset, f, indent=2)
         
         # Save meta.pkl
@@ -241,7 +241,7 @@ class MazeNavDataGenerator:
             'padding_token_id': self.padding_token_id
         }
         
-        with open(os.path.join(self.config.output_dir, 'meta.pkl'), 'wb') as f:
+        with open(os.path.join(self.config.output_dir, f'meta_{self.config.maze_size}.pkl'), 'wb') as f:
             pickle.dump(meta, f)
         
         # Save binary data
@@ -257,8 +257,8 @@ class MazeNavDataGenerator:
                 np.array(tokens, dtype=dtype).tofile(os.path.join(self.config.output_dir, filename))
             return len(tokens)
         
-        train_tokens = save_binary(dataset['train']['sequences'], 'train.bin')
-        val_tokens = save_binary(dataset['test']['sequences'], 'val.bin')
+        train_tokens = save_binary(dataset['train']['sequences'], f'train_{self.config.maze_size}.bin')
+        val_tokens = save_binary(dataset['test']['sequences'], f'val_{self.config.maze_size}.bin')
         
         # Save PyTorch format
         pytorch_data = dataset.copy()
@@ -342,7 +342,7 @@ class MazeNavDataGenerator:
 def main():
     """Generate maze navigation training data."""
     config = MazeNavConfig(
-        maze_size=8,
+        maze_size=10,
         seed=41,
         output_dir="maze_nav_data",
         max_pairs=10000000, 
