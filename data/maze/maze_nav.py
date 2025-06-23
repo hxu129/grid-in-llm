@@ -246,6 +246,8 @@ class MazeNavDataGenerator:
         
         # Save binary data
         def save_binary(sequences, filename):
+            # shuffle before saving
+            random.shuffle(sequences)
             tokens = []
             for seq_data in sequences:
                 token_ids = [self.token_to_id[token] for token in seq_data['sequence']]
