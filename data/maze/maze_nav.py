@@ -223,7 +223,7 @@ class MazeNavDataGenerator:
         os.makedirs(self.config.output_dir, exist_ok=True)
         
         # Save main dataset
-        with open(os.path.join(self.config.output_dir, "maze_nav_dataset.json"), 'w') as f:
+        with open(os.path.join(self.config.output_dir, f"maze_nav_dataset_{self.config.maze_size}.json"), 'w') as f:
             json.dump(dataset, f, indent=2)
         
         # Save meta.pkl
@@ -265,7 +265,7 @@ class MazeNavDataGenerator:
         pytorch_data['train_data'] = [[self.token_to_id[t] for t in s['sequence']] for s in dataset['train']['sequences']]
         pytorch_data['test_data'] = [[self.token_to_id[t] for t in s['sequence']] for s in dataset['test']['sequences']]
         
-        with open(os.path.join(self.config.output_dir, "maze_nav_pytorch.json"), 'w') as f:
+        with open(os.path.join(self.config.output_dir, f"maze_nav_pytorch_{self.config.maze_size}.json"), 'w') as f:
             json.dump(pytorch_data, f, indent=2)
         
         return train_tokens, val_tokens
