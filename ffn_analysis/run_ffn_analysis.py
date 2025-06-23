@@ -17,6 +17,98 @@ import sys
 import argparse
 from ffn_position_analysis import FFNActivationCollector
 from visualize_ffn_analysis import main as visualize_main
+from neuron_heatmap_visualizer import plot_single_neuron_heatmap
+import numpy as np
+import matplotlib.pyplot as plt
+
+def find_representative_neurons_and_save_images(matrices: dict, grid_size: int, 
+                                              save_dir: str = "representative_neurons"):
+    """
+    For each position, find the most representative neuron and save its activation image.
+    
+    Args:
+        matrices: Dictionary of layer matrices from analysis
+        grid_size: Size of the maze grid
+        save_dir: Directory to save representative neuron images
+    """
+    print(f"\nFinding representative neurons for each position...")
+    
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    n_positions = grid_size * grid_size
+    representative_neurons = {}
+    
+    # Process each layer type
+    for matrix_name, matrix in matrices.items():
+        if matrix is None or matrix.size == 0:
+            continue
+            
+        layer_dir = os.path.join(save_dir, matrix_name)
+        if not os.path.exists(layer_dir):
+            os.makedirs(layer_dir)
+        
+        layer_representatives = {}
+        
+        print(f"Processing {matrix_name} ({matrix.shape})...")
+        
+        # For each position, find the neuron with highest average activation
+        for position in range(n_positions):
+            position_row = matrix[position, :]  # All neurons for this position
+            
+            # Skip positions with no data
+            if np.all(np.isnan(position_row)):
+                continue
+            
+            # Find neuron with highest activation for this position
+            valid_neurons = ~np.isnan(position_row)
+            if np.any(valid_neurons):
+                valid_activations = position_row[valid_neurons]
+                max_activation_idx = np.argmax(valid_activations)
+                # Map back to original neuron index
+                neuron_indices = np.where(valid_neurons)[0]
+                best_neuron_idx = neuron_indices[max_activation_idx]
+                max_activation_value = valid_activations[max_activation_idx]
+                
+                layer_representatives[position] = {
+                    'neuron_idx': best_neuron_idx,
+                    'activation_value': max_activation_value,
+                    'grid_pos': (position // grid_size, position % grid_size)
+                }
+                
+                # Create and save heatmap for this neuron
+                try:
+                    neuron_activations = matrix[:, best_neuron_idx:best_neuron_idx+1]  # Shape: (64, 1)
+                    
+                    fig = plot_single_neuron_heatmap(
+                        neuron_activations,
+                        neuron_idx=0,  # Index into the single neuron matrix
+                        grid_size=grid_size,
+                        title=f"{matrix_name} - Position {position} [{position//grid_size},{position%grid_size}]\nNeuron {best_neuron_idx} (activation: {max_activation_value:.3f})",
+                        figsize=(8, 6),
+                        cmap='RdYlBu_r'
+                    )
+                    
+                    # Save the image
+                    save_path = os.path.join(layer_dir, f"pos_{position:02d}_neuron_{best_neuron_idx}.png")
+                    fig.savefig(save_path, dpi=300, bbox_inches='tight')
+                    plt.close(fig)
+                    
+                except Exception as e:
+                    print(f"Warning: Could not create image for position {position}, neuron {best_neuron_idx}: {e}")
+        
+        representative_neurons[matrix_name] = layer_representatives
+        print(f"  Found {len(layer_representatives)} representative neurons")
+    
+    # Save summary information
+    summary_path = os.path.join(save_dir, "representative_neurons_summary.npz")
+    np.savez_compressed(summary_path, **representative_neurons)
+    
+    print(f"Representative neuron analysis complete!")
+    print(f"Images saved in: {save_dir}/")
+    print(f"Summary saved in: {summary_path}")
+    
+    return representative_neurons
 
 def run_complete_analysis(max_samples: int = 100, 
                          completion_length: int = 8,
@@ -24,7 +116,8 @@ def run_complete_analysis(max_samples: int = 100,
                          grid_size: int = 8,
                          normalization: str = 'z_score',
                          skip_collection: bool = False,
-                         skip_visualization: bool = False):
+                         skip_visualization: bool = False,
+                         save_representative_neurons: bool = True):
     """
     Run the complete FFN position analysis pipeline.
     
@@ -99,16 +192,46 @@ def run_complete_analysis(max_samples: int = 100,
         print("STEP 2: Skipping visualization")
     
     print()
+    
+    # Step 3: Representative Neurons Analysis
+    if save_representative_neurons:
+        print("STEP 3: Finding representative neurons...")
+        print("-" * 40)
+        
+        try:
+            # Load the matrices
+            data = np.load(results_file, allow_pickle=True)
+            matrices = {}
+            for key in data.keys():
+                if key.startswith('layer_'):
+                    matrices[key] = data[key]
+            
+            # Find and save representative neurons
+            representative_neurons = find_representative_neurons_and_save_images(
+                matrices, grid_size
+            )
+            print("✓ Representative neurons analysis complete!")
+            
+        except Exception as e:
+            print(f"✗ Error during representative neurons analysis: {e}")
+            return False
+    else:
+        print("STEP 3: Skipping representative neurons analysis")
+    
+    print()
     print("="*80)
     print("ANALYSIS COMPLETE!")
     print("="*80)
     print(f"Results saved in: {results_file}")
     print("Visualizations saved in: ffn_visualizations/")
+    if save_representative_neurons:
+        print("Representative neurons saved in: representative_neurons/")
     print()
     print("To load results later:")
     print(f"  import numpy as np")
     print(f"  data = np.load('{results_file}')")
-    print(f"  layer_0_matrix = data['layer_0']  # Shape: (64, 768)")
+    print(f"  layer_0_fc_matrix = data['layer_0_fc']  # First linear layer")
+    print(f"  layer_0_proj_matrix = data['layer_0_proj']  # Second linear layer")
     print()
     
     return True
@@ -125,7 +248,7 @@ def main():
                        help='Number of validation samples to process')
     parser.add_argument('--completion-length', type=int, default=8,
                        help='Number of tokens to generate per sample')
-    parser.add_argument('--model-path', type=str, default='out-maze-nav',
+    parser.add_argument('--model-path', type=str, default='../out-maze-nav',
                        help='Path to the trained model directory')
     parser.add_argument('--grid-size', type=int, default=8,
                        help='Size of the maze grid')
@@ -138,6 +261,8 @@ def main():
                        help='Skip visualization step')
     parser.add_argument('--quick', action='store_true',
                        help='Quick run with fewer samples (for testing)')
+    parser.add_argument('--no-representative-neurons', action='store_true',
+                       help='Skip representative neurons analysis')
     
     args = parser.parse_args()
     
@@ -167,7 +292,8 @@ def main():
         grid_size=args.grid_size,
         normalization=args.normalization,
         skip_collection=args.skip_collection,
-        skip_visualization=args.skip_visualization
+        skip_visualization=args.skip_visualization,
+        save_representative_neurons=not args.no_representative_neurons
     )
     
     return 0 if success else 1

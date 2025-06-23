@@ -1,10 +1,14 @@
 import os
+import sys
 import pickle
 import numpy as np
 import torch
 import torch.nn.functional as F
 from collections import defaultdict
 from contextlib import nullcontext
+
+# Add parent directory to Python path to import model
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model import GPTConfig, GPT
 import ecco
 from typing import Dict, List, Tuple, Optional
@@ -16,7 +20,7 @@ class FFNActivationCollector:
     Focuses on intermediate activations (after GELU, before second linear layer).
     """
     
-    def __init__(self, model_path: str = 'out-maze-nav', grid_size: int = 8):
+    def __init__(self, model_path: str = '../out-maze-nav', grid_size: int = 8):
         """
         Initialize the activation collector.
         
@@ -28,6 +32,10 @@ class FFNActivationCollector:
         self.n_positions = grid_size * grid_size
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         
+        # Get the directory where this script is located
+        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.project_root = os.path.dirname(self.script_dir)  # Parent directory
+        
         # Load model and setup
         self.model, self.tokenizer = self._load_model(model_path)
         self.n_layers = self.model.config.n_layer
@@ -35,7 +43,8 @@ class FFNActivationCollector:
         self.ffn_size = 4 * self.n_embd  # Size of FFN intermediate layer
         
         # Storage for activations
-        self.position_activations = defaultdict(lambda: defaultdict(list))  # {layer: {position: [activations]}}
+        self.position_activations_fc = defaultdict(lambda: defaultdict(list))  # First linear layer (after GELU)
+        self.position_activations_proj = defaultdict(lambda: defaultdict(list))  # Second linear layer (after c_proj)
         self.hooks = {}
         
         print(f"Model loaded: {self.n_layers} layers, {self.n_embd} embedding dim, {self.ffn_size} FFN size")
@@ -61,7 +70,7 @@ class FFNActivationCollector:
         model.to(self.device)
         
         # Load tokenizer metadata
-        meta_path = os.path.join('data', checkpoint['config']['dataset'], 'meta.pkl')
+        meta_path = os.path.join(self.project_root, 'data', checkpoint['config']['dataset'], 'meta.pkl')
         with open(meta_path, 'rb') as f:
             meta = pickle.load(f)
         
@@ -95,9 +104,11 @@ class FFNActivationCollector:
         
         return model, tokenizer
     
-    def _load_validation_data(self, val_path: str = "data/maze/maze_nav_data/val.bin", 
+    def _load_validation_data(self, val_path: str = None, 
                             max_samples: int = 100) -> List[List[int]]:
         """Load validation data following logit_lens.ipynb pattern."""
+        if val_path is None:
+            val_path = os.path.join(self.project_root, "data", "maze", "maze_nav_data", "val.bin")
         val = np.memmap(val_path, dtype=np.uint16, mode="r")
         
         # Parse validation data into individual paths
@@ -117,13 +128,13 @@ class FFNActivationCollector:
         return data[:max_samples].tolist()
     
     def _register_ffn_hooks(self):
-        """Register hooks to capture FFN intermediate activations."""
+        """Register hooks to capture FFN activations from both linear layers."""
         self._remove_hooks()  # Clear any existing hooks
         
-        def create_hook(layer_idx):
+        def create_fc_hook(layer_idx):
+            """Hook for first linear layer (after GELU)"""
             def hook_fn(module, input, output):
                 # This hook captures activations after GELU but before c_proj
-                # The input to this hook is the output of GELU
                 if hasattr(self, '_current_generated_position') and self._current_generated_position is not None:
                     # Store activation for the current position being generated
                     activation = input[0].detach().float().cpu().numpy()  # Convert to float32 first
@@ -132,18 +143,41 @@ class FFNActivationCollector:
                     
                     layer_key = f"layer_{layer_idx}"
                     position = self._current_generated_position
-                    self.position_activations[layer_key][position].append(last_token_activation.copy())
+                    self.position_activations_fc[layer_key][position].append(last_token_activation.copy())
             
             return hook_fn
         
-        # Register hooks for each layer's MLP c_proj (captures input after GELU)
-        for layer_idx in range(self.n_layers):
-            layer_name = f"transformer.h.{layer_idx}.mlp.c_proj"
-            layer_module = dict(self.model.named_modules())[layer_name]
-            hook = layer_module.register_forward_hook(create_hook(layer_idx))
-            self.hooks[layer_name] = hook
+        def create_proj_hook(layer_idx):
+            """Hook for second linear layer (after c_proj)"""
+            def hook_fn(module, input, output):
+                # This hook captures activations after c_proj (final FFN output)
+                if hasattr(self, '_current_generated_position') and self._current_generated_position is not None:
+                    # Store activation for the current position being generated
+                    activation = output.detach().float().cpu().numpy()  # (batch, seq_len, n_embd)
+                    # Take the last token position (the one being generated)
+                    last_token_activation = activation[0, -1, :]  # (n_embd,)
+                    
+                    layer_key = f"layer_{layer_idx}"
+                    position = self._current_generated_position
+                    self.position_activations_proj[layer_key][position].append(last_token_activation.copy())
             
-        print(f"Registered hooks for {len(self.hooks)} FFN layers")
+            return hook_fn
+        
+        # Register hooks for both linear layers in each transformer layer
+        for layer_idx in range(self.n_layers):
+            # Hook for first linear layer (input to c_proj = after GELU)
+            fc_layer_name = f"transformer.h.{layer_idx}.mlp.c_proj"
+            fc_module = dict(self.model.named_modules())[fc_layer_name]
+            fc_hook = fc_module.register_forward_hook(create_fc_hook(layer_idx))
+            self.hooks[fc_layer_name + "_fc"] = fc_hook
+            
+            # Hook for second linear layer (output of c_proj)
+            proj_layer_name = f"transformer.h.{layer_idx}.mlp.c_proj"
+            proj_module = dict(self.model.named_modules())[proj_layer_name]
+            proj_hook = proj_module.register_forward_hook(create_proj_hook(layer_idx))
+            self.hooks[proj_layer_name + "_proj"] = proj_hook
+            
+        print(f"Registered hooks for {len(self.hooks)} FFN operations ({self.n_layers} layers × 2 linear operations each)")
     
     def _remove_hooks(self):
         """Remove all registered hooks."""
@@ -285,10 +319,31 @@ class FFNActivationCollector:
     def _print_collection_summary(self):
         """Print summary of collected activations."""
         print("\nActivation Collection Summary:")
-        print("=" * 50)
+        print("=" * 60)
         
-        for layer_key in sorted(self.position_activations.keys()):
-            layer_data = self.position_activations[layer_key]
+        print("First Linear Layer (after GELU):")
+        print("-" * 30)
+        for layer_key in sorted(self.position_activations_fc.keys()):
+            layer_data = self.position_activations_fc[layer_key]
+            total_activations = sum(len(acts) for acts in layer_data.values())
+            unique_positions = len(layer_data)
+            
+            print(f"{layer_key}: {total_activations} activations across {unique_positions} unique positions")
+            
+            # Show position coverage
+            if layer_data:
+                positions_with_data = sorted(layer_data.keys())
+                print(f"  Positions: {positions_with_data[:10]}{'...' if len(positions_with_data) > 10 else ''}")
+                
+                # Show activation counts per position
+                pos_counts = {pos: len(acts) for pos, acts in layer_data.items()}
+                avg_count = np.mean(list(pos_counts.values()))
+                print(f"  Avg activations per position: {avg_count:.1f}")
+        
+        print("\nSecond Linear Layer (after c_proj):")
+        print("-" * 30)
+        for layer_key in sorted(self.position_activations_proj.keys()):
+            layer_data = self.position_activations_proj[layer_key]
             total_activations = sum(len(acts) for acts in layer_data.values())
             unique_positions = len(layer_data)
             
@@ -306,7 +361,7 @@ class FFNActivationCollector:
     
     def normalize_and_create_matrices(self, normalization: str = 'z_score') -> Dict[str, np.ndarray]:
         """
-        Normalize activations and create position-neuron matrices.
+        Normalize activations and create position-neuron matrices for both linear layers.
         
         Args:
             normalization: 'z_score', 'min_max', or 'none'
@@ -318,11 +373,13 @@ class FFNActivationCollector:
         
         matrices = {}
         
-        for layer_key in sorted(self.position_activations.keys()):
-            layer_data = self.position_activations[layer_key]
+        # Process first linear layer (after GELU)
+        print("Processing first linear layer activations...")
+        for layer_key in sorted(self.position_activations_fc.keys()):
+            layer_data = self.position_activations_fc[layer_key]
             
             if not layer_data:
-                print(f"Warning: No data for {layer_key}")
+                print(f"Warning: No data for {layer_key}_fc")
                 continue
             
             # Initialize matrix: (n_positions, n_neurons)
@@ -336,37 +393,73 @@ class FFNActivationCollector:
                     matrix[position, :] = avg_activation
             
             # Apply normalization
-            if normalization == 'z_score':
-                # Z-score normalization per neuron (across positions)
-                for neuron_idx in range(self.ffn_size):
-                    neuron_data = matrix[:, neuron_idx]
-                    valid_data = neuron_data[~np.isnan(neuron_data)]
-                    if len(valid_data) > 1:
-                        mean_val = np.mean(valid_data)
-                        std_val = np.std(valid_data)
-                        if std_val > 0:
-                            matrix[:, neuron_idx] = (neuron_data - mean_val) / std_val
-            
-            elif normalization == 'min_max':
-                # Min-max normalization per neuron
-                for neuron_idx in range(self.ffn_size):
-                    neuron_data = matrix[:, neuron_idx]
-                    valid_data = neuron_data[~np.isnan(neuron_data)]
-                    if len(valid_data) > 1:
-                        min_val = np.min(valid_data)
-                        max_val = np.max(valid_data)
-                        if max_val > min_val:
-                            matrix[:, neuron_idx] = (neuron_data - min_val) / (max_val - min_val)
+            matrix = self._apply_normalization(matrix, normalization, self.ffn_size)
             
             # Store matrix
-            matrices[layer_key] = matrix
+            matrices[f"{layer_key}_fc"] = matrix
             
             # Print statistics
             valid_entries = ~np.isnan(matrix)
             coverage = np.mean(valid_entries) * 100
-            print(f"{layer_key}: {matrix.shape} matrix, {coverage:.1f}% coverage")
+            print(f"{layer_key}_fc: {matrix.shape} matrix, {coverage:.1f}% coverage")
+        
+        # Process second linear layer (after c_proj)
+        print("Processing second linear layer activations...")
+        for layer_key in sorted(self.position_activations_proj.keys()):
+            layer_data = self.position_activations_proj[layer_key]
+            
+            if not layer_data:
+                print(f"Warning: No data for {layer_key}_proj")
+                continue
+            
+            # Initialize matrix: (n_positions, n_embd)
+            matrix = np.full((self.n_positions, self.n_embd), np.nan)
+            
+            # Fill matrix with averaged activations
+            for position, activations_list in layer_data.items():
+                if activations_list:
+                    # Average multiple activations for the same position
+                    avg_activation = np.mean(activations_list, axis=0)
+                    matrix[position, :] = avg_activation
+            
+            # Apply normalization
+            matrix = self._apply_normalization(matrix, normalization, self.n_embd)
+            
+            # Store matrix
+            matrices[f"{layer_key}_proj"] = matrix
+            
+            # Print statistics
+            valid_entries = ~np.isnan(matrix)
+            coverage = np.mean(valid_entries) * 100
+            print(f"{layer_key}_proj: {matrix.shape} matrix, {coverage:.1f}% coverage")
         
         return matrices
+    
+    def _apply_normalization(self, matrix: np.ndarray, normalization: str, n_neurons: int) -> np.ndarray:
+        """Apply normalization to a matrix."""
+        if normalization == 'z_score':
+            # Z-score normalization per neuron (across positions)
+            for neuron_idx in range(n_neurons):
+                neuron_data = matrix[:, neuron_idx]
+                valid_data = neuron_data[~np.isnan(neuron_data)]
+                if len(valid_data) > 1:
+                    mean_val = np.mean(valid_data)
+                    std_val = np.std(valid_data)
+                    if std_val > 0:
+                        matrix[:, neuron_idx] = (neuron_data - mean_val) / std_val
+        
+        elif normalization == 'min_max':
+            # Min-max normalization per neuron
+            for neuron_idx in range(n_neurons):
+                neuron_data = matrix[:, neuron_idx]
+                valid_data = neuron_data[~np.isnan(neuron_data)]
+                if len(valid_data) > 1:
+                    min_val = np.min(valid_data)
+                    max_val = np.max(valid_data)
+                    if max_val > min_val:
+                        matrix[:, neuron_idx] = (neuron_data - min_val) / (max_val - min_val)
+        
+        return matrix
     
     def save_results(self, matrices: Dict[str, np.ndarray], 
                     save_path: str = "ffn_position_analysis_results.npz"):
@@ -400,9 +493,14 @@ def main():
     print("Starting FFN Position Analysis...")
     print("=" * 60)
     
+    # Get absolute paths
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    model_path = os.path.join(project_root, 'out-maze-nav')
+    
     # Initialize collector
     collector = FFNActivationCollector(
-        model_path='out-maze-nav',
+        model_path=model_path,
         grid_size=8
     )
     
