@@ -3,6 +3,7 @@
 
 # I/O
 out_dir = 'out-maze-nav'
+maze_size = 8
 eval_interval = 250
 log_interval = 10
 eval_iters = 100
@@ -16,7 +17,7 @@ wandb_run_name = 'maze-nav-gpt'
 
 # data
 dataset = 'maze/maze_nav_data'  # This should match your maze data directory
-gradient_accumulation_steps = 1  # Reduced for smaller sequences
+gradient_accumulation_steps = 1  # Must be divisible by number of GPUs for DDP
 batch_size = 32  # Reasonable batch size for path learning
 max_seq_len = 1000000  # Maximum sequence length for any path (no artificial limit)
 
@@ -45,7 +46,7 @@ min_lr = 3e-5
 backend = 'nccl'
 
 # system
-device = 'cuda'
+device = 'cuda:1'
 # Note: dtype check is done in train.py
 dtype = 'bfloat16'  # will be validated in train.py
 compile = False  # False for safer inference, can be overridden 
