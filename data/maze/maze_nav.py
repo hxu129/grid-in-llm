@@ -30,6 +30,7 @@ class MazeNavConfig:
     output_dir: str = "maze_nav_data"
     max_pairs: Optional[int] = None
     train_ratio: float = 0.8
+    algorithm: str = "wilson" # "wilson" or "dfs"
 
 
 class MazeNavDataGenerator:
@@ -57,7 +58,7 @@ class MazeNavDataGenerator:
         print(f"Generating {self.config.maze_size}x{self.config.maze_size} maze...")
         
         # Generate maze
-        maze_config = MazeConfig(size=self.config.maze_size, seed=self.config.seed)
+        maze_config = MazeConfig(size=self.config.maze_size, seed=self.config.seed, algorithm=self.config.algorithm)
         generator = MazeGenerator(maze_config)
         self.maze_data = generator.generate_maze()
         
@@ -242,7 +243,7 @@ class MazeNavDataGenerator:
             'padding_token_id': self.padding_token_id
         }
         
-        with open(os.path.join(self.config.output_dir, 'meta.pkl'), 'wb') as f:
+        with open(os.path.join(self.config.output_dir, f'meta_{self.config.maze_size}.pkl'), 'wb') as f:
             pickle.dump(meta, f)
         
         # Save binary data
@@ -260,8 +261,8 @@ class MazeNavDataGenerator:
                 np.array(tokens, dtype=dtype).tofile(os.path.join(self.config.output_dir, filename))
             return len(tokens)
         
-        train_tokens = save_binary(dataset['train']['sequences'], 'train.bin')
-        val_tokens = save_binary(dataset['test']['sequences'], 'val.bin')
+        train_tokens = save_binary(dataset['train']['sequences'], f'train_{self.config.maze_size}.bin')
+        val_tokens = save_binary(dataset['test']['sequences'], f'val_{self.config.maze_size}.bin')
         
         # Save PyTorch format
         pytorch_data = dataset.copy()
@@ -345,13 +346,14 @@ class MazeNavDataGenerator:
 def main():
     """Generate maze navigation training data."""
     # load config from maze_gen_config.py
-    from maze_gen_config import maze_size, max_pairs, train_ratio, seed, output_dir
+    from maze_gen_config import maze_size, max_pairs, train_ratio, seed, output_dir, algorithm
     config = MazeNavConfig()
     config.maze_size = maze_size
     config.max_pairs = max_pairs
     config.train_ratio = train_ratio
     config.seed = seed
     config.output_dir = output_dir
+    config.algorithm = algorithm
     
     generator = MazeNavDataGenerator(config)
     dataset = generator.generate_data()
