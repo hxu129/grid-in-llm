@@ -82,7 +82,7 @@ def find_representative_neurons_and_save_images(matrices: dict, grid_size: int,
                 
                 # Create and save heatmap for this neuron
                 try:
-                    neuron_activations = matrix[:, best_neuron_idx:best_neuron_idx+1]  # Shape: (64, 1)
+                    neuron_activations = matrix[:, best_neuron_idx:best_neuron_idx+1]  # Shape: (n_positions, 1)
                     
                     fig = plot_single_neuron_heatmap(
                         neuron_activations,

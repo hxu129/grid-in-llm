@@ -26,7 +26,7 @@ class FFNActivationCollector:
         
         Args:
             model_path: Path to the trained model directory
-            grid_size: Size of the maze grid (8 for 8x8)
+            grid_size: Size of the maze grid
         """
         self.grid_size = grid_size
         self.n_positions = grid_size * grid_size
@@ -186,7 +186,7 @@ class FFNActivationCollector:
         self.hooks = {}
     
     def _is_position_token(self, token_id: int) -> bool:
-        """Check if a token represents a grid position (0-63 for 8x8 grid)."""
+        """Check if a token represents a grid position (0 to grid_size^2-1)."""
         token_str = self.tokenizer.convert_ids_to_tokens([token_id])[0]
         try:
             pos = int(token_str)
@@ -508,7 +508,7 @@ def main():
     # Initialize collector
     collector = FFNActivationCollector(
         model_path=model_path,
-        grid_size=8
+        grid_size=8  # Change this for different maze sizes
     )
     
     # Collect activations
