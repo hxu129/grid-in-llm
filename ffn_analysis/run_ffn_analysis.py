@@ -115,7 +115,8 @@ def find_representative_neurons_and_save_images(matrices: dict, grid_size: int,
     return representative_neurons
 
 def run_complete_analysis(max_samples: int = 100, 
-                         completion_length: int = 8,
+                         min_positions: int = 3,
+                         max_positions: int = 100,
                          model_path: str = 'out-maze-nav',
                          grid_size: int = 8,
                          normalization: str = 'z_score',
@@ -127,7 +128,8 @@ def run_complete_analysis(max_samples: int = 100,
     
     Args:
         max_samples: Number of validation samples to process
-        completion_length: Number of tokens to generate per sample
+        min_positions: Minimum number of position tokens required per sample
+        max_positions: Maximum number of position tokens to process per sample
         model_path: Path to the trained model directory
         grid_size: Size of the maze grid
         normalization: Normalization method ('z_score', 'min_max', 'none')
@@ -149,7 +151,8 @@ def run_complete_analysis(max_samples: int = 100,
     print(f"Grid size: {grid_size}x{grid_size}")
     print(f"Output directory: {grid_base_dir}/")
     print(f"Max samples: {max_samples}")
-    print(f"Completion length: {completion_length}")
+    print(f"Min positions per sample: {min_positions}")
+    print(f"Max positions per sample: {max_positions}")
     print(f"Normalization: {normalization}")
     print()
     
@@ -168,7 +171,8 @@ def run_complete_analysis(max_samples: int = 100,
             # Collect activations
             collector.collect_activations(
                 max_samples=max_samples,
-                completion_length=completion_length
+                min_positions=min_positions,
+                max_positions=max_positions
             )
             
             # Create normalized matrices
@@ -263,8 +267,10 @@ def main():
     
     parser.add_argument('--max-samples', type=int, default=100,
                        help='Number of validation samples to process')
-    parser.add_argument('--completion-length', type=int, default=8,
-                       help='Number of tokens to generate per sample')
+    parser.add_argument('--min-positions', type=int, default=3,
+                       help='Minimum number of position tokens required per sample')
+    parser.add_argument('--max-positions', type=int, default=500,
+                       help='Maximum number of position tokens to process per sample')
     parser.add_argument('--model-path', type=str, default='../out-maze-nav',
                        help='Path to the trained model directory')
     parser.add_argument('--grid-size', type=int, default=8,
@@ -286,7 +292,8 @@ def main():
     # Quick mode adjustments
     if args.quick:
         args.max_samples = 20
-        args.completion_length = 5
+        args.min_positions = 3
+        args.max_positions = 5
         print("Quick mode enabled: reduced samples and completion length")
     
     # Check if model exists
@@ -304,7 +311,8 @@ def main():
     # Run the analysis
     success = run_complete_analysis(
         max_samples=args.max_samples,
-        completion_length=args.completion_length,
+        min_positions=args.min_positions,
+        max_positions=args.max_positions,
         model_path=args.model_path,
         grid_size=args.grid_size,
         normalization=args.normalization,

@@ -108,7 +108,7 @@ class FFNActivationCollector:
                             max_samples: int = 100) -> List[List[int]]:
         """Load validation data following logit_lens.ipynb pattern."""
         if val_path is None:
-            val_path = os.path.join(self.project_root, "data", "maze", "maze_nav_data", f"train_{self.grid_size}.bin")
+            val_path = os.path.join(self.project_root, "data", "maze", "maze_nav_data", f"val_{self.grid_size}.bin")
         val = np.memmap(val_path, dtype=np.uint16, mode="r")
         
         # Parse validation data into individual paths
@@ -195,13 +195,15 @@ class FFNActivationCollector:
             return False
     
     def _extract_path_completion_samples(self, paths: List[List[int]], 
-                                       completion_length: int = 10) -> List[Tuple[List[int], List[int]]]:
+                                       min_positions: int = 3, 
+                                       max_positions: int = 100) -> List[Tuple[List[int], List[int]]]:
         """
         Extract (prefix, target) pairs for path completion.
         
         Args:
             paths: List of complete paths
-            completion_length: Number of tokens to predict
+            min_positions: Minimum number of position tokens required (lower bound)
+            max_positions: Maximum number of position tokens to collect (upper bound)
             
         Returns:
             List of (prefix, target_positions) tuples
@@ -209,9 +211,9 @@ class FFNActivationCollector:
         samples = []
         
         for path in paths:
-            if len(path) < completion_length + 3:  # Need at least start, end, first_pos + completion
+            if len(path) < min_positions + 3:  # Need at least start, end, first_pos + min_positions
                 continue
-                
+
             # Take first 3 tokens as prefix (start, end, first_pos)
             prefix = path[:3]
             
@@ -220,30 +222,35 @@ class FFNActivationCollector:
             target_positions = []
             
             for token in remaining_tokens:
-                if self._is_position_token(token) and len(target_positions) < completion_length:
+                if self._is_position_token(token) and len(target_positions) < max_positions:
                     target_positions.append(token)
-                if len(target_positions) >= completion_length:
+                if len(target_positions) >= max_positions:
                     break
             
-            if len(target_positions) >= 3:  # Need at least a few positions to predict
+            if len(target_positions) >= min_positions:  # Use configurable minimum
                 samples.append((prefix, target_positions))
         
         return samples
     
-    def collect_activations(self, max_samples: int = 100, completion_length: int = 8):
+    def collect_activations(self, max_samples: int = 100, 
+                          min_positions: int = 3, 
+                          max_positions: int = 100):
         """
         Main method to collect FFN activations during position generation.
         
         Args:
             max_samples: Maximum number of validation samples to process
-            completion_length: Number of tokens to generate per sample
+            min_positions: Minimum number of position tokens required per sample
+            max_positions: Maximum number of position tokens to process per sample
         """
         print("Loading validation data...")
         validation_paths = self._load_validation_data(max_samples=max_samples * 2)  # Load extra in case some are filtered
         
         print("Extracting path completion samples...")
         completion_samples = self._extract_path_completion_samples(
-            validation_paths, completion_length=completion_length
+            validation_paths, 
+            min_positions=min_positions,
+            max_positions=max_positions
         )[:max_samples]
         
         print(f"Processing {len(completion_samples)} completion samples...")
@@ -266,7 +273,7 @@ class FFNActivationCollector:
                         # Generate tokens one by one
                         current_input = input_ids.clone()
                         
-                        for target_pos in target_positions[:completion_length]:
+                        for target_pos in target_positions[:max_positions]:  # Use max_positions limit
                             # Set the current position we're trying to generate
                             self._current_generated_position = target_pos
                             
@@ -295,7 +302,7 @@ class FFNActivationCollector:
                                     pass
                                 
                                 # Prevent sequences from getting too long
-                                if current_input.size(1) > self.grid_size * 2:
+                                if current_input.size(1) > self.grid_size ** 2 * 2:
                                     break
                                     
                             except Exception as e:
@@ -507,7 +514,8 @@ def main():
     # Collect activations
     collector.collect_activations(
         max_samples=50,  # Start with fewer samples for testing
-        completion_length=8
+        min_positions=3,
+        max_positions=8
     )
     
     # Create normalized matrices
