@@ -146,7 +146,7 @@ def create_maze_overlay_heatmap(activation_matrix: np.ndarray, neuron_idx: int,
     if maze_data is not None:
         adj_matrix = np.array(maze_data['adjacency_matrix'])
         wall_color = '#2C3E50'  # Dark, clear wall color
-        wall_lw = 5  # Increased wall thickness
+        wall_lw = 5  if grid_size <= 24 else 1 # Increased wall thickness
         
         for r in range(grid_size):
             for c in range(grid_size):
@@ -268,7 +268,7 @@ def create_maze_overlay_grid(results: Dict, layer_name: str,
         if maze_data is not None:
             adj_matrix = np.array(maze_data['adjacency_matrix'])
             wall_color = '#2C3E50'
-            wall_lw = 5 # Increased wall thickness for grid view
+            wall_lw = 5 if grid_size <= 24 else 1 # Increased wall thickness for grid view
 
             for r in range(grid_size):
                 for c in range(grid_size):

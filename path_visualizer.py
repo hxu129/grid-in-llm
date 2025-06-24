@@ -192,7 +192,7 @@ class PathVisualizer:
                 # Add text label with node ID
                 ax.text(grid_col, grid_row, str(node_id), 
                        ha='center', va='center', 
-                       fontsize=9, color='black', weight='bold',
+                       fontsize=9 if self.maze_size <= 24 else 4, color='black', weight='bold',
                        bbox=dict(boxstyle="round,pad=0.2", 
                                facecolor='yellow', alpha=0.8, edgecolor='black', linewidth=0.5),
                        zorder=3)
