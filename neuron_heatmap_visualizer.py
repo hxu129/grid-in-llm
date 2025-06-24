@@ -16,6 +16,7 @@ def plot_neuron_heatmaps(
     save_path: Optional[str] = None,
     title_prefix: str = "Neuron",
     show_colorbar: bool = True,
+    individual_cbar: bool = True,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None
 ) -> plt.Figure:
@@ -33,6 +34,7 @@ def plot_neuron_heatmaps(
         save_path (str, optional): Path to save the figure
         title_prefix (str): Prefix for subplot titles
         show_colorbar (bool): Whether to show colorbar for each heatmap
+        individual_cbar (bool): If True, each heatmap uses its own color scale.
         vmin, vmax (float, optional): Min and max values for color scale. If None, uses data range.
     
     Returns:
@@ -91,13 +93,14 @@ def plot_neuron_heatmaps(
         # Multiple rows and columns - flatten the array
         axes = axes.flatten()
     
-    # Determine global color scale if not provided
-    if vmin is None or vmax is None:
-        selected_activations = activations[:, neuron_indices]
-        if vmin is None:
-            vmin = selected_activations.min()
-        if vmax is None:
-            vmax = selected_activations.max()
+    # Determine global color scale if not using individual ones
+    if not individual_cbar:
+        if vmin is None or vmax is None:
+            selected_activations = activations[:, neuron_indices]
+            if vmin is None:
+                vmin = np.nanmin(selected_activations)
+            if vmax is None:
+                vmax = np.nanmax(selected_activations)
     
     # Plot each neuron
     for i, neuron_idx in enumerate(neuron_indices):
@@ -106,12 +109,19 @@ def plot_neuron_heatmaps(
         # Reshape activations to grid
         neuron_activations = activations[:, neuron_idx].reshape(grid_size, grid_size)
         
+        current_vmin, current_vmax = vmin, vmax
+        if individual_cbar:
+            current_vmin, current_vmax = np.nanmin(neuron_activations), np.nanmax(neuron_activations)
+            if current_vmin == current_vmax: # Avoid error with flat data
+                current_vmin -= 1
+                current_vmax += 1
+
         # Create heatmap
         im = ax.imshow(
             neuron_activations,
             cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
+            vmin=current_vmin,
+            vmax=current_vmax,
             origin='lower',
             interpolation='nearest',
             extent=(-0.5, grid_size - 0.5, -0.5, grid_size - 0.5)

@@ -16,12 +16,13 @@ import os
 import sys
 import argparse
 from ffn_position_analysis import FFNActivationCollector
-from visualize_ffn_analysis import main as visualize_main
+from visualize_ffn_analysis import main as visualize_main, load_maze_data
 from neuron_heatmap_visualizer import plot_single_neuron_heatmap
 import numpy as np
 import matplotlib.pyplot as plt
 
 def find_representative_neurons_and_save_images(matrices: dict, grid_size: int, 
+                                              maze_data: dict = None,
                                               save_dir: str = "representative_neurons"):
     """
     For each position, find the most representative neuron and save its activation image.
@@ -29,6 +30,7 @@ def find_representative_neurons_and_save_images(matrices: dict, grid_size: int,
     Args:
         matrices: Dictionary of layer matrices from analysis
         grid_size: Size of the maze grid
+        maze_data: Dictionary containing maze data for overlay
         save_dir: Directory to save representative neuron images
     """
     print(f"\nFinding representative neurons for each position...")
@@ -88,7 +90,8 @@ def find_representative_neurons_and_save_images(matrices: dict, grid_size: int,
                         neuron_activations,
                         neuron_idx=0,  # Index into the single neuron matrix
                         grid_size=grid_size,
-                        title=f"{matrix_name} - Position {position} [{position//grid_size},{position%grid_size}]\nNeuron {best_neuron_idx} (activation: {max_activation_value:.3f})",
+                        maze_data=maze_data,
+                        title=f"{matrix_name} - Pos {position} [{position//grid_size},{position%grid_size}]\nNeuron {best_neuron_idx} (act: {max_activation_value:.3f})",
                         figsize=(8, 6),
                         cmap='RdYlBu_r'
                     )
@@ -227,9 +230,13 @@ def run_complete_analysis(max_samples: int = 100,
                 if key.startswith('layer_'):
                     matrices[key] = data[key]
             
+            # Load maze data for visualization
+            print("  Loading maze data for visualization...")
+            maze_data = load_maze_data(grid_size)
+            
             # Find and save representative neurons
             representative_neurons = find_representative_neurons_and_save_images(
-                matrices, grid_size
+                matrices, grid_size, maze_data=maze_data
             )
             print("✓ Representative neurons analysis complete!")
             

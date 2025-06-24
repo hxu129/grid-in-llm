@@ -360,7 +360,7 @@ def analyze_neuron_specialization(results: Dict, layer_name: str, top_k: int = 2
     }
 
 def visualize_layer_overview_with_maze(results: Dict, layer_name: str, 
-                                     n_neurons_to_show: int = 16,
+                                     n_neurons_to_show: int = 100,
                                      figsize: tuple = (16, 12),
                                      maze_data: Dict = None):
     """Visualize an overview of the most interesting neurons in a layer overlaid on maze."""
