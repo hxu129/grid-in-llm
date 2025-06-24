@@ -70,7 +70,7 @@ class FFNActivationCollector:
         model.to(self.device)
         
         # Load tokenizer metadata
-        meta_path = os.path.join(self.project_root, 'data', checkpoint['config']['dataset'], 'meta.pkl')
+        meta_path = os.path.join(self.project_root, 'data', checkpoint['config']['dataset'], f'meta_{self.grid_size}.pkl')
         with open(meta_path, 'rb') as f:
             meta = pickle.load(f)
         
