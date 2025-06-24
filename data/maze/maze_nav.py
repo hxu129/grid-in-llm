@@ -139,9 +139,10 @@ class MazeNavDataGenerator:
         direct = [(s, e) for s, e in all_pairs if adj_matrix[s][e] == 1]
         others = [(s, e) for s, e in all_pairs if adj_matrix[s][e] == 0]
         
-        # Random sampling with replacement for training
+        # Random sampling without replacement for training
         train_size = int(len(others) * self.config.train_ratio)
-        train_others = random.choices(others, k=train_size)  # sampling with replacement
+        # train_others = random.choices(others, k=train_size)  # sampling with replacement
+        train_others = random.sample(others, k=train_size)  # sampling without replacement
         train_pairs = direct + train_others
         
         # For test, use remaining others (without replacement to avoid overlap)
@@ -343,13 +344,14 @@ class MazeNavDataGenerator:
 
 def main():
     """Generate maze navigation training data."""
-    config = MazeNavConfig(
-        maze_size=10,
-        seed=41,
-        output_dir="maze_nav_data",
-        max_pairs=10000000, 
-        train_ratio=0.8
-    )
+    # load config from maze_gen_config.py
+    from maze_gen_config import maze_size, max_pairs, train_ratio, seed, output_dir
+    config = MazeNavConfig()
+    config.maze_size = maze_size
+    config.max_pairs = max_pairs
+    config.train_ratio = train_ratio
+    config.seed = seed
+    config.output_dir = output_dir
     
     generator = MazeNavDataGenerator(config)
     dataset = generator.generate_data()
