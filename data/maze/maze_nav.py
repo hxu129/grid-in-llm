@@ -11,6 +11,8 @@ import random
 import os
 import sys
 import pickle
+import itertools
+from multiprocessing import Pool, cpu_count
 from typing import List, Dict, Tuple, Optional
 from collections import deque
 from dataclasses import dataclass
@@ -105,8 +107,8 @@ class MazeNavDataGenerator:
                 'total_pairs': len(all_pairs),
                 'train_pairs': len(train_pairs),
                 'test_pairs': len(test_pairs),
-                'avg_train_length': np.mean([s['length'] for s in train_sequences]) if train_sequences else 0,
-                'avg_test_length': np.mean([s['length'] for s in test_sequences]) if test_sequences else 0,
+                'avg_train_length': float(np.mean([s['length'] for s in train_sequences])) if train_sequences else 0,
+                'avg_test_length': float(np.mean([s['length'] for s in test_sequences])) if test_sequences else 0,
                 'max_sequence_length': max([s['length'] for s in train_sequences + test_sequences]) if (train_sequences or test_sequences) else 0
             }
         }
@@ -115,23 +117,12 @@ class MazeNavDataGenerator:
         return dataset
     
     def _find_reachable_pairs(self) -> List[Tuple[int, int]]:
-        """Find all pairs of reachable nodes using BFS."""
-        adj_matrix = np.array(self.maze_data['adjacency_matrix'])
+        """Find all pairs of reachable nodes."""
         num_nodes = self.maze_data['num_nodes']
-        all_pairs = []
-        
-        for start in range(num_nodes):
-            visited = {start}
-            queue = deque([start])
-            
-            while queue:
-                current = queue.popleft()
-                for neighbor in range(num_nodes):
-                    if adj_matrix[current][neighbor] == 1 and neighbor not in visited:
-                        visited.add(neighbor)
-                        queue.append(neighbor)
-                        all_pairs.append((start, neighbor))
-        
+        # The maze is a spanning tree, so all nodes are reachable from one another.
+        # This is much faster than running BFS from every node.
+        # We use itertools.permutations to get all ordered pairs.
+        all_pairs = list(itertools.permutations(range(num_nodes), 2))
         return all_pairs
     
     def _split_pairs(self, all_pairs: List[Tuple[int, int]]) -> Tuple[List, List]:
@@ -147,25 +138,35 @@ class MazeNavDataGenerator:
         train_pairs = direct + train_others
         
         # For test, use remaining others (without replacement to avoid overlap)
-        remaining_others = [pair for pair in others if pair not in train_others]
+        train_others_set = set(train_others)
+        remaining_others = [pair for pair in others if pair not in train_others_set]
         test_pairs = remaining_others
         
         return train_pairs, test_pairs
     
     def _generate_sequences(self, pairs: List[Tuple[int, int]]) -> List[Dict]:
-        """Generate training sequences from node pairs."""
-        sequences = []
-        for start, end in pairs:
-            path = self._find_shortest_path(start, end)
-            if path and len(path) > 1:
-                sequence = self._path_to_sequence(path)
-                sequences.append({
-                    'start_node': start,
-                    'end_node': end,
-                    'path': path,
-                    'sequence': sequence,
-                    'length': len(sequence)
-                })
+        """Generate training sequences from node pairs in parallel."""
+        
+        num_processes = cpu_count()
+        print(f"Generating sequences in parallel with {num_processes} processes...")
+
+        # Convert adjacency matrix to a NumPy array for efficient processing
+        adj_matrix = np.array(self.maze_data['adjacency_matrix'])
+
+        # Prepare arguments for the worker function
+        args = [(
+            start, end, 
+            adj_matrix, 
+            self.maze_data['num_nodes'], 
+            self.config.maze_size,
+            self.direction_to_offset
+        ) for start, end in pairs]
+        
+        with Pool(processes=num_processes) as pool:
+            results = pool.starmap(_process_pair_worker, args)
+            
+        # Filter out None results (for paths that couldn't be found, though this shouldn't happen in a connected maze)
+        sequences = [res for res in results if res is not None]
         return sequences
     
     def _find_shortest_path(self, start: int, end: int) -> Optional[List[int]]:
@@ -341,6 +342,71 @@ class MazeNavDataGenerator:
         except Exception as e:
             print(f"Warning: Sample paths visualization failed: {e}")
             return None
+
+
+def _find_shortest_path_static(start: int, end: int, adj_matrix: np.ndarray, num_nodes: int) -> Optional[List[int]]:
+    """Static version of find_shortest_path for multiprocessing."""
+    if start == end:
+        return [start]
+    
+    queue = deque([start])
+    visited = {start}
+    parent = {start: None}
+    
+    while queue:
+        current = queue.popleft()
+        # Find neighbors using the adjacency matrix
+        neighbors = np.where(adj_matrix[current] == 1)[0]
+        for neighbor in neighbors:
+            if neighbor not in visited:
+                visited.add(neighbor)
+                parent[neighbor] = current
+                queue.append(neighbor)
+                
+                if neighbor == end:
+                    path = []
+                    node = end
+                    while node is not None:
+                        path.append(node)
+                        node = parent.get(node)
+                    return path[::-1]
+    return None
+
+def _path_to_sequence_static(path: List[int], maze_size: int, direction_to_offset: dict) -> List:
+    """Static version of _path_to_sequence for multiprocessing."""
+    if len(path) < 2:
+        return []
+    
+    sequence = [path[0], path[-1], path[0]]  # start, end, start
+    
+    for i in range(len(path) - 1):
+        from_row, from_col = path[i] // maze_size, path[i] % maze_size
+        to_row, to_col = path[i+1] // maze_size, path[i+1] % maze_size
+        offset = (to_row - from_row, to_col - from_col)
+        
+        for direction, dir_offset in direction_to_offset.items():
+            if offset == dir_offset:
+                sequence.extend([direction, path[i + 1]])
+                break
+    
+    sequence.append("\n")
+    return sequence
+
+def _process_pair_worker(start, end, adj_matrix, num_nodes, maze_size, direction_to_offset):
+    """Worker function for parallel sequence generation."""
+    path = _find_shortest_path_static(start, end, adj_matrix, num_nodes)
+    if path and len(path) > 1:
+        # Convert numpy integers in path to standard Python integers for JSON serialization
+        path = [int(node) for node in path]
+        sequence = _path_to_sequence_static(path, maze_size, direction_to_offset)
+        return {
+            'start_node': start,
+            'end_node': end,
+            'path': path,
+            'sequence': sequence,
+            'length': len(sequence)
+        }
+    return None
 
 
 def main():
