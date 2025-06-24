@@ -118,8 +118,6 @@ def find_representative_neurons_and_save_images(matrices: dict, grid_size: int,
     return representative_neurons
 
 def run_complete_analysis(max_samples: int = 100, 
-                         min_positions: int = 3,
-                         max_positions: int = 100,
                          model_path: str = 'out-maze-nav',
                          grid_size: int = 8,
                          normalization: str = 'z_score',
@@ -131,8 +129,6 @@ def run_complete_analysis(max_samples: int = 100,
     
     Args:
         max_samples: Number of validation samples to process
-        min_positions: Minimum number of position tokens required per sample
-        max_positions: Maximum number of position tokens to process per sample
         model_path: Path to the trained model directory
         grid_size: Size of the maze grid
         normalization: Normalization method ('z_score', 'min_max', 'none')
@@ -154,8 +150,6 @@ def run_complete_analysis(max_samples: int = 100,
     print(f"Grid size: {grid_size}x{grid_size}")
     print(f"Output directory: {grid_base_dir}/")
     print(f"Max samples: {max_samples}")
-    print(f"Min positions per sample: {min_positions}")
-    print(f"Max positions per sample: {max_positions}")
     print(f"Normalization: {normalization}")
     print()
     
@@ -173,9 +167,7 @@ def run_complete_analysis(max_samples: int = 100,
             
             # Collect activations
             collector.collect_activations(
-                max_samples=max_samples,
-                min_positions=min_positions,
-                max_positions=max_positions
+                max_samples=max_samples
             )
             
             # Create normalized matrices
@@ -265,71 +257,39 @@ def run_complete_analysis(max_samples: int = 100,
     return True
 
 def main():
-    """Main function with command line argument parsing."""
-    
+    """Main function to parse arguments and run the pipeline."""
     parser = argparse.ArgumentParser(
-        description="Run FFN position analysis for maze navigation model",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        description="Run the complete FFN position analysis pipeline."
     )
     
-    parser.add_argument('--max-samples', type=int, default=100,
-                       help='Number of validation samples to process')
-    parser.add_argument('--min-positions', type=int, default=3,
-                       help='Minimum number of position tokens required per sample')
-    parser.add_argument('--max-positions', type=int, default=500,
-                       help='Maximum number of position tokens to process per sample')
-    parser.add_argument('--model-path', type=str, default='../out-maze-nav',
-                       help='Path to the trained model directory')
+    parser.add_argument('--max-samples', type=int, default=1000,
+                        help="Number of validation samples to process")
     parser.add_argument('--grid-size', type=int, default=8,
-                       help='Size of the maze grid')
+                        help="Size of the maze grid (e.g., 8 for 8x8)")
+    parser.add_argument('--model-path', type=str, default=os.path.join('..', 'out-maze-nav'),
+                        help="Path to the trained model directory")
     parser.add_argument('--normalization', type=str, default='z_score',
-                       choices=['z_score', 'min_max', 'none'],
-                       help='Normalization method for activations')
+                        choices=['z_score', 'min_max', 'none'],
+                        help="Normalization method for activation matrices")
     parser.add_argument('--skip-collection', action='store_true',
-                       help='Skip data collection if results file exists')
+                        help="Skip data collection and use existing results file")
     parser.add_argument('--skip-visualization', action='store_true',
-                       help='Skip visualization step')
-    parser.add_argument('--quick', action='store_true',
-                       help='Quick run with fewer samples (for testing)')
-    parser.add_argument('--no-representative-neurons', action='store_true',
-                       help='Skip representative neurons analysis')
-    
+                        help="Skip the main visualization step")
+    parser.add_argument('--no-representative-neurons', action='store_false', dest='save_representative_neurons',
+                        help="Do not run the representative neurons analysis")
+
     args = parser.parse_args()
     
-    # Quick mode adjustments
-    if args.quick:
-        args.max_samples = 20
-        args.min_positions = 3
-        args.max_positions = 5
-        print("Quick mode enabled: reduced samples and completion length")
-    
-    # Check if model exists
-    if not os.path.exists(args.model_path):
-        print(f"Error: Model path '{args.model_path}' does not exist!")
-        print("Please train the maze navigation model first or specify correct path.")
-        return 1
-    
-    # Check if checkpoint exists
-    ckpt_path = os.path.join(args.model_path, 'ckpt.pt')
-    if not os.path.exists(ckpt_path):
-        print(f"Error: Model checkpoint '{ckpt_path}' does not exist!")
-        return 1
-    
-    # Run the analysis
-    success = run_complete_analysis(
+    # Start the pipeline
+    run_complete_analysis(
         max_samples=args.max_samples,
-        min_positions=args.min_positions,
-        max_positions=args.max_positions,
-        model_path=args.model_path,
         grid_size=args.grid_size,
+        model_path=args.model_path,
         normalization=args.normalization,
         skip_collection=args.skip_collection,
         skip_visualization=args.skip_visualization,
-        save_representative_neurons=not args.no_representative_neurons
+        save_representative_neurons=args.save_representative_neurons
     )
-    
-    return 0 if success else 1
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code) 
+    main() 

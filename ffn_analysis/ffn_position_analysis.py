@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from collections import defaultdict
 from contextlib import nullcontext
+import random
 
 # Add parent directory to Python path to import model
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -108,58 +109,50 @@ class FFNActivationCollector:
                             max_samples: int = 100) -> List[List[int]]:
         """Load validation data following logit_lens.ipynb pattern."""
         if val_path is None:
-            val_path = os.path.join(self.project_root, "data", "maze", "maze_nav_data", f"val_{self.grid_size}.bin")
-        val = np.memmap(val_path, dtype=np.uint16, mode="r")
+            val_path = os.path.join(self.project_root, "data", "maze", "maze_nav_data", f"train_{self.grid_size}.bin")
         
-        # Parse validation data into individual paths
-        data = []
-        temp = []
-        for d in val:
-            if d == self.grid_size ** 2 + 4:  # End of sequence marker
-                if temp:
-                    data.append(temp)
-                temp = []
-            else:
-                temp.append(int(d))
+        val_data = np.fromfile(val_path, dtype=np.uint16)
         
-        # Shuffle and limit samples
-        data = np.array(data, dtype=object)
-        np.random.shuffle(data)
-        return data[:max_samples].tolist()
+        # Split data by end-of-sequence marker
+        eos_marker = self.grid_size ** 2 + 4
+        path_indices = np.where(val_data == eos_marker)[0]
+        paths = np.split(val_data, path_indices + 1)
+        
+        # Convert to list of lists, filtering out any empty paths from split
+        all_paths = [p.tolist()[:-1] for p in paths if p.size > 1]
+        
+        # Shuffle and select a subset of paths
+        random.shuffle(all_paths)
+        return all_paths[:max_samples]
     
     def _register_ffn_hooks(self):
-        """Register hooks to capture FFN activations from both linear layers."""
+        """Register hooks to capture FFN activations from both linear layers for a whole sequence."""
         self._remove_hooks()  # Clear any existing hooks
-        
-        def create_fc_hook(layer_idx):
-            """Hook for first linear layer (after GELU)"""
+
+        def create_hook(layer_idx, activation_type):
             def hook_fn(module, input, output):
-                # This hook captures activations after GELU but before c_proj
-                if hasattr(self, '_current_generated_position') and self._current_generated_position is not None:
-                    # Store activation for the current position being generated
-                    activation = input[0].detach().float().cpu().numpy()  # Convert to float32 first
-                    # Take the last token position (the one being generated)
-                    last_token_activation = activation[0, -1, :]  # (ffn_size,)
-                    
-                    layer_key = f"layer_{layer_idx}"
-                    position = self._current_generated_position
-                    self.position_activations_fc[layer_key][position].append(last_token_activation.copy())
-            
-            return hook_fn
-        
-        def create_proj_hook(layer_idx):
-            """Hook for second linear layer (after c_proj)"""
-            def hook_fn(module, input, output):
-                # This hook captures activations after c_proj (final FFN output)
-                if hasattr(self, '_current_generated_position') and self._current_generated_position is not None:
-                    # Store activation for the current position being generated
-                    activation = output.detach().float().cpu().numpy()  # (batch, seq_len, n_embd)
-                    # Take the last token position (the one being generated)
-                    last_token_activation = activation[0, -1, :]  # (n_embd,)
-                    
-                    layer_key = f"layer_{layer_idx}"
-                    position = self._current_generated_position
-                    self.position_activations_proj[layer_key][position].append(last_token_activation.copy())
+                if self._current_path is None:
+                    return
+
+                # Choose the right activation tensor based on the hook type
+                if activation_type == 'fc': # Before c_proj (after GELU)
+                    activations_tensor = input[0]
+                else: # 'proj', after c_proj
+                    activations_tensor = output
+
+                activations = activations_tensor.detach().float().cpu().numpy()[0]  # (seq_len, n_neurons)
+                path = self._current_path
+                
+                # Determine which dictionary to store activations in
+                target_activations_dict = self.position_activations_fc if activation_type == 'fc' else self.position_activations_proj
+
+                for i in range(activations.shape[0]): # Loop over sequence length
+                    target_token_id = path[i + 1]  # The token being predicted
+                    if self._is_position_token(target_token_id):
+                        position = target_token_id
+                        activation_at_pos_i = activations[i, :]
+                        layer_key = f"layer_{layer_idx}"
+                        target_activations_dict[layer_key][position].append(activation_at_pos_i.copy())
             
             return hook_fn
         
@@ -168,13 +161,13 @@ class FFNActivationCollector:
             # Hook for first linear layer (input to c_proj = after GELU)
             fc_layer_name = f"transformer.h.{layer_idx}.mlp.c_proj"
             fc_module = dict(self.model.named_modules())[fc_layer_name]
-            fc_hook = fc_module.register_forward_hook(create_fc_hook(layer_idx))
+            fc_hook = fc_module.register_forward_hook(create_hook(layer_idx, 'fc'))
             self.hooks[fc_layer_name + "_fc"] = fc_hook
             
             # Hook for second linear layer (output of c_proj)
             proj_layer_name = f"transformer.h.{layer_idx}.mlp.c_proj"
             proj_module = dict(self.model.named_modules())[proj_layer_name]
-            proj_hook = proj_module.register_forward_hook(create_proj_hook(layer_idx))
+            proj_hook = proj_module.register_forward_hook(create_hook(layer_idx, 'proj'))
             self.hooks[proj_layer_name + "_proj"] = proj_hook
             
         print(f"Registered hooks for {len(self.hooks)} FFN operations ({self.n_layers} layers × 2 linear operations each)")
@@ -194,130 +187,54 @@ class FFNActivationCollector:
         except (ValueError, TypeError):
             return False
     
-    def _extract_path_completion_samples(self, paths: List[List[int]], 
-                                       min_positions: int = 3, 
-                                       max_positions: int = 100) -> List[Tuple[List[int], List[int]]]:
+    def collect_activations(self, max_samples: int = 100):
         """
-        Extract (prefix, target) pairs for path completion.
+        Main method to collect FFN activations. Processes full paths at once.
         
         Args:
-            paths: List of complete paths
-            min_positions: Minimum number of position tokens required (lower bound)
-            max_positions: Maximum number of position tokens to collect (upper bound)
-            
-        Returns:
-            List of (prefix, target_positions) tuples
-        """
-        samples = []
-        
-        for path in paths:
-            if len(path) < min_positions + 3:  # Need at least start, end, first_pos + min_positions
-                continue
-
-            # Take first 3 tokens as prefix (start, end, first_pos)
-            prefix = path[:3]
-            
-            # Extract position tokens from the remainder (skip direction tokens)
-            remaining_tokens = path[3:]
-            target_positions = []
-            
-            for token in remaining_tokens:
-                if self._is_position_token(token) and len(target_positions) < max_positions:
-                    target_positions.append(token)
-                if len(target_positions) >= max_positions:
-                    break
-            
-            if len(target_positions) >= min_positions:  # Use configurable minimum
-                samples.append((prefix, target_positions))
-        
-        return samples
-    
-    def collect_activations(self, max_samples: int = 100, 
-                          min_positions: int = 3, 
-                          max_positions: int = 100):
-        """
-        Main method to collect FFN activations during position generation.
-        
-        Args:
-            max_samples: Maximum number of validation samples to process
-            min_positions: Minimum number of position tokens required per sample
-            max_positions: Maximum number of position tokens to process per sample
+            max_samples: Maximum number of validation samples to process.
         """
         print("Loading validation data...")
-        validation_paths = self._load_validation_data(max_samples=max_samples * 2)  # Load extra in case some are filtered
+        validation_paths = self._load_validation_data(max_samples=max_samples)
         
-        print("Extracting path completion samples...")
-        completion_samples = self._extract_path_completion_samples(
-            validation_paths, 
-            min_positions=min_positions,
-            max_positions=max_positions
-        )[:max_samples]
-        
-        print(f"Processing {len(completion_samples)} completion samples...")
+        print(f"Processing {len(validation_paths)} validation paths...")
         
         # Register hooks
         self._register_ffn_hooks()
         
         processed_samples = 0
+        self._current_path = None
         
         try:
             with torch.no_grad():
-                for sample_idx, (prefix, target_positions) in enumerate(completion_samples):
+                for sample_idx, path in enumerate(validation_paths):
                     if sample_idx % 10 == 0:
-                        print(f"Processing sample {sample_idx}/{len(completion_samples)}")
+                        print(f"Processing sample {sample_idx}/{len(validation_paths)}")
                     
+                    if len(path) < 2:
+                        continue
+
                     try:
-                        # Convert prefix to tensor
-                        input_ids = torch.tensor([prefix], dtype=torch.long, device=self.device)
-                        
-                        # Generate tokens one by one
-                        current_input = input_ids.clone()
-                        
-                        for target_pos in target_positions[:max_positions]:  # Use max_positions limit
-                            # Set the current position we're trying to generate
-                            self._current_generated_position = target_pos
-                            
-                            try:
-                                # Forward pass to generate next token
-                                # Use autocast only if supported and beneficial
-                                if self.device == 'cuda' and torch.cuda.is_bf16_supported():
-                                    with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-                                        outputs = self.model(input_ids=current_input)
-                                        logits = outputs[0] if isinstance(outputs, tuple) else outputs.logits
-                                else:
-                                    # No autocast for CPU or unsupported GPU
-                                    outputs = self.model(input_ids=current_input)
-                                    logits = outputs[0] if isinstance(outputs, tuple) else outputs.logits
-                                
-                                # Get the predicted token (we know it should be target_pos)
-                                next_token_logits = logits[:, -1, :]
-                                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-                                
-                                # Append the predicted token and continue
-                                current_input = torch.cat([current_input, next_token], dim=1)
-                                
-                                # Verify we're generating position tokens
-                                if self._is_position_token(next_token.item()):
-                                    # Activation was captured in the hook
-                                    pass
-                                
-                                # Prevent sequences from getting too long
-                                if current_input.size(1) > self.grid_size ** 2 * 2:
-                                    break
-                                    
-                            except Exception as e:
-                                print(f"Warning: Error processing position {target_pos} in sample {sample_idx}: {e}")
-                                break  # Skip rest of this sample
+                        # Input is the path sequence, excluding the last token
+                        input_ids = torch.tensor([path[:-1]], dtype=torch.long, device=self.device)
+                        self._current_path = path  # Provide full path for hooks
+
+                        # Forward pass to trigger hooks
+                        if self.device == 'cuda' and torch.cuda.is_bf16_supported():
+                            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+                                self.model(input_ids=input_ids)
+                        else:
+                            self.model(input_ids=input_ids)
                         
                         processed_samples += 1
                         
                     except Exception as e:
                         print(f"Warning: Error processing sample {sample_idx}: {e}")
-                        continue  # Skip this sample entirely
+                        continue
         
         finally:
             # Clean up
-            self._current_generated_position = None
+            self._current_path = None
             self._remove_hooks()
         
         print(f"Processed {processed_samples} samples")
@@ -513,9 +430,7 @@ def main():
     
     # Collect activations
     collector.collect_activations(
-        max_samples=50,  # Start with fewer samples for testing
-        min_positions=3,
-        max_positions=8
+        max_samples=500,  # Can use more samples now
     )
     
     # Create normalized matrices
