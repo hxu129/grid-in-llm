@@ -121,6 +121,8 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
+train_sequences = None # Cache for training sequences
+val_sequences = None   # Cache for validation sequences
 
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
@@ -164,34 +166,41 @@ def get_batch(split):
 
 def get_path_batch(data, split):
     """Get batch for path learning with variable-length sequences."""
-    # For maze path data, we reconstruct sequences from the flattened data
-    # by splitting on the EOS token.
-    
-    if eos_token_id is None:
-        raise ValueError("get_path_batch is called but eos_token_id is not set. Is meta.pkl present?")
-    
-    if padding_token_id is None:
-        raise ValueError("get_path_batch is called but padding_token_id is not set. Is meta.pkl present?")
+    global train_sequences, val_sequences
 
-    # Find all indices of the newline token
-    # The data is a numpy memmap, so we can use numpy operations on it
-    newline_indices = np.where(data == eos_token_id)[0]
-    
-    # Create sequences by splitting the data array based on the newline token
-    sequences = []
-    start_idx = 0
-    for end_idx in newline_indices:
-        # Extract the sequence, excluding the newline token itself
-        seq = data[start_idx:end_idx].tolist()
-        if seq:  # Avoid adding empty sequences
-            sequences.append(seq)
-        start_idx = end_idx + 1
-    
-    # Add the last sequence if the file doesn't end with a newline token
-    if start_idx < len(data):
-        seq = data[start_idx:].tolist()
-        if seq:
-            sequences.append(seq)
+    sequences = train_sequences if split == 'train' else val_sequences
+
+    if sequences is None:
+        if eos_token_id is None:
+            raise ValueError("get_path_batch is called but eos_token_id is not set. Is meta.pkl present?")
+        if padding_token_id is None:
+            raise ValueError("get_path_batch is called but padding_token_id is not set. Is meta.pkl present?")
+
+        # First-time setup: process and cache sequences
+        print(f"Processing and caching sequences for '{split}' split...")
+        newline_indices = np.where(data == eos_token_id)[0]
+        
+        processed_sequences = []
+        start_idx = 0
+        for end_idx in newline_indices:
+            # Extract the sequence, excluding the newline token itself
+            seq = data[start_idx:end_idx].tolist()
+            if seq:  # Avoid adding empty sequences
+                processed_sequences.append(seq)
+            start_idx = end_idx + 1
+        
+        # Add the last sequence if the file doesn't end with a newline token
+        if start_idx < len(data):
+            seq = data[start_idx:].tolist()
+            if seq:
+                processed_sequences.append(seq)
+        
+        sequences = processed_sequences
+        if split == 'train':
+            train_sequences = sequences
+        else: # 'val'
+            val_sequences = sequences
+        print(f"Cached {len(sequences)} sequences for '{split}' split.")
 
     # Sample batch_size sequences
     if not sequences:
