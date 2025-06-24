@@ -127,7 +127,6 @@ val_sequences = None   # Cache for validation sequences
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
-    global maze_size
     if split == 'train':
         data = np.memmap(os.path.join(data_dir, f'train_{maze_size}.bin'), dtype=np.uint16, mode='r')
     else:
@@ -333,7 +332,8 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    dataset_name = dataset.split('/')[-1]
+    ckpt_path = os.path.join(out_dir, f'ckpt_{maze_size}_{dataset_name}.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -463,7 +463,8 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                dataset_name = dataset.split('/')[-1]
+                torch.save(checkpoint, os.path.join(out_dir, f'ckpt_{maze_size}_{dataset_name}.pt'))
     if iter_num == 0 and eval_only:
         break
 
