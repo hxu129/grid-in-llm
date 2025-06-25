@@ -12,6 +12,8 @@ import os
 import sys
 import pickle
 import itertools
+import logging
+import time
 from multiprocessing import Pool, cpu_count
 from typing import List, Dict, Tuple, Optional
 from collections import deque
@@ -32,7 +34,7 @@ class MazeNavConfig:
     output_dir: str = "maze_nav_data"
     max_pairs: Optional[int] = None
     train_ratio: float = 0.8
-    algorithm: str = "wilson" # "wilson" or "dfs"
+    algorithm: str = "wilson" # "wilson", "dfs", or "kruskal"
     # Free world mode parameters
     free_world_mode: bool = False
     num_random_paths: int = 50000
@@ -62,10 +64,10 @@ class MazeNavDataGenerator:
     def generate_data(self) -> Dict:
         """Generate complete training dataset."""
         if self.config.free_world_mode:
-            print(f"Generating {self.config.maze_size}x{self.config.maze_size} free world (no walls)...")
+            logging.info(f"Generating {self.config.maze_size}x{self.config.maze_size} free world (no walls)...")
             self.maze_data = self._create_free_world()
         else:
-            print(f"Generating {self.config.maze_size}x{self.config.maze_size} maze...")
+            logging.info(f"Generating {self.config.maze_size}x{self.config.maze_size} maze...")
             # Generate maze
             maze_config = MazeConfig(size=self.config.maze_size, seed=self.config.seed, algorithm=self.config.algorithm)
             generator = MazeGenerator(maze_config)
@@ -79,7 +81,7 @@ class MazeNavDataGenerator:
         self.vocab_size = len(vocab)
         self.padding_token_id = self.token_to_id['<PAD>']
         
-        print(f"Generated {'free world' if self.config.free_world_mode else 'maze'} with {num_nodes} nodes, vocab size: {self.vocab_size}")
+        logging.info(f"Generated {'free world' if self.config.free_world_mode else 'maze'} with {num_nodes} nodes, vocab size: {self.vocab_size}")
         
         if self.config.free_world_mode:
             # Generate random paths with node coverage
@@ -132,7 +134,7 @@ class MazeNavDataGenerator:
             }
         }
         
-        print(f"Generated {len(train_sequences)} train, {len(test_sequences)} test sequences")
+        logging.info(f"Generated {len(train_sequences)} train, {len(test_sequences)} test sequences")
         return dataset
     
     def _find_reachable_pairs(self) -> List[Tuple[int, int]]:
@@ -167,7 +169,7 @@ class MazeNavDataGenerator:
         """Generate training sequences from node pairs in parallel."""
         
         num_processes = cpu_count()
-        print(f"Generating sequences in parallel with {num_processes} processes...")
+        logging.info(f"Generating sequences in parallel with {num_processes} processes...")
 
         # Convert adjacency matrix to a NumPy array for efficient processing
         adj_matrix = np.array(self.maze_data['adjacency_matrix'])
@@ -265,7 +267,12 @@ class MazeNavDataGenerator:
             'num_nodes': num_nodes,
             'adjacency_matrix': adjacency_matrix.tolist(),
             'grid': [[1 for _ in range(size)] for _ in range(size)],  # All cells are open
-            'free_world': True
+            'free_world': True,
+            'config': {
+                'size': size,
+                'seed': self.config.seed,
+                'algorithm': 'free_world'
+            }
         }
         
         return maze_data
@@ -307,7 +314,7 @@ class MazeNavDataGenerator:
                 covered_nodes.add(start)
                 covered_nodes.add(end)
         
-        print(f"Generated {len(pairs)} random pairs covering {len(covered_nodes)}/{num_nodes} nodes")
+        logging.info(f"Generated {len(pairs)} random pairs covering {len(covered_nodes)}/{num_nodes} nodes")
         return pairs
     
     def _split_pairs_free_world(self, all_pairs: List[Tuple[int, int]]) -> Tuple[List, List]:
@@ -322,7 +329,7 @@ class MazeNavDataGenerator:
     def _generate_sequences_free_world(self, pairs: List[Tuple[int, int]]) -> List[Dict]:
         """Generate training sequences for free world mode."""
         num_processes = cpu_count()
-        print(f"Generating free world sequences in parallel with {num_processes} processes...")
+        logging.info(f"Generating free world sequences in parallel with {num_processes} processes...")
 
         # For free world, we don't need maze constraints, just generate random valid paths
         args = [(
@@ -351,7 +358,7 @@ class MazeNavDataGenerator:
         current_row, current_col = start_row, start_col
         
         # Generate a random path that eventually reaches the target
-        max_steps = size * 2  # Reasonable limit to avoid infinite loops
+        max_steps = size ** 4
         step_count = 0
         
         while (current_row, current_col) != (end_row, end_col) and step_count < max_steps:
@@ -452,7 +459,7 @@ class MazeNavDataGenerator:
     def visualize_maze(self, save_path: str = None):
         """Create a visualization of the maze with node labels."""
         if not self.maze_data:
-            print("No maze data available for visualization")
+            logging.warning("No maze data available for visualization")
             return None
         
         try:
@@ -470,16 +477,16 @@ class MazeNavDataGenerator:
             return save_path
             
         except ImportError:
-            print("Warning: Visualization requires matplotlib. Skipping visualization.")
+            logging.warning("Warning: Visualization requires matplotlib. Skipping visualization.")
             return None
         except Exception as e:
-            print(f"Warning: Visualization failed: {e}")
+            logging.warning(f"Warning: Visualization failed: {e}")
             return None
     
     def visualize_sample_paths(self, dataset: Dict, num_samples: int = 3, save_path: str = None):
         """Visualize sample navigation paths on the maze."""
         if not self.maze_data:
-            print("No maze data available for visualization")
+            logging.warning("No maze data available for visualization")
             return None
         
         try:
@@ -488,7 +495,7 @@ class MazeNavDataGenerator:
             # Get sample sequences
             train_sequences = dataset['train']['sequences']
             if not train_sequences:
-                print("No training sequences available")
+                logging.warning("No training sequences available")
                 return None
             
             # Sample from different lengths
@@ -514,7 +521,7 @@ class MazeNavDataGenerator:
             return save_path
             
         except Exception as e:
-            print(f"Warning: Sample paths visualization failed: {e}")
+            logging.warning(f"Warning: Sample paths visualization failed: {e}")
             return None
 
 
@@ -584,63 +591,59 @@ def _process_pair_worker(start, end, adj_matrix, num_nodes, maze_size, direction
 
 
 def _generate_random_path_free_world_static(start: int, end: int, maze_size: int) -> List[int]:
-    """Static version of _generate_random_path_free_world for multiprocessing."""
+    """
+    Static version of _generate_random_path_free_world for multiprocessing.
+    Generates a self-avoiding random walk. If the walk gets stuck, it completes
+    the path with a deterministic shortest walk to the target.
+    """
     if start == end:
         return [start]
-    
-    start_row, start_col = start // maze_size, start % maze_size
-    end_row, end_col = end // maze_size, end % maze_size
-    
+
     path = [start]
-    current_row, current_col = start_row, start_col
-    
-    # Generate a random path that eventually reaches the target
-    max_steps = maze_size * 2  # Reasonable limit to avoid infinite loops
-    step_count = 0
-    
-    direction_to_offset = {
-        "up": (-1, 0), "right": (0, 1), "down": (1, 0), "left": (0, -1)
-    }
-    
-    while (current_row, current_col) != (end_row, end_col) and step_count < max_steps:
-        # Choose direction that gets us closer to target with some randomness
+    visited_in_path = {start}
+
+    current_row, current_col = start // maze_size, start % maze_size
+    end_row, end_col = end // maze_size, end % maze_size
+
+    max_steps = maze_size ** 4
+    direction_to_offset = {"up": (-1, 0), "right": (0, 1), "down": (1, 0), "left": (0, -1)}
+
+    for step_count in range(max_steps):
+        if (current_row, current_col) == (end_row, end_col):
+            break  # Target reached
+
+        # Find valid, unvisited neighbors
         possible_moves = []
-        
-        # Add all valid moves
         for direction, (dr, dc) in direction_to_offset.items():
             new_row, new_col = current_row + dr, current_col + dc
-            if 0 <= new_row < maze_size and 0 <= new_col < maze_size:
-                possible_moves.append((direction, new_row, new_col))
-        
+            new_node = new_row * maze_size + new_col
+            if 0 <= new_row < maze_size and 0 <= new_col < maze_size and new_node not in visited_in_path:
+                possible_moves.append((direction, new_row, new_col, new_node))
+
         if not possible_moves:
+            # The self-avoiding walk is trapped
             break
-        
+
         # Weight moves towards the target
         weighted_moves = []
-        for direction, new_row, new_col in possible_moves:
-            # Calculate distance to target
+        for direction, new_row, new_col, new_node in possible_moves:
             dist_to_target = abs(new_row - end_row) + abs(new_col - end_col)
             current_dist = abs(current_row - end_row) + abs(current_col - end_col)
-            
-            # Prefer moves that get closer, but allow some randomness
-            if dist_to_target < current_dist:
-                weight = 3  # Higher weight for good moves
-            else:
-                weight = 1  # Lower weight for random moves
-            
-            weighted_moves.extend([(direction, new_row, new_col)] * weight)
-        
-        # Choose a move
-        direction, new_row, new_col = random.choice(weighted_moves)
+            weight = 3 if dist_to_target < current_dist else 1
+            weighted_moves.extend([(direction, new_row, new_col, new_node)] * weight)
+
+        if not weighted_moves:
+            # This can happen if all moves increase distance, pick one at random
+            direction, new_row, new_col, new_node = random.choice(possible_moves)
+        else:
+            direction, new_row, new_col, new_node = random.choice(weighted_moves)
+
         current_row, current_col = new_row, new_col
-        new_node = current_row * maze_size + current_col
         path.append(new_node)
-        step_count += 1
-    
-    # If we didn't reach the target, add a direct path to it
-    if (current_row, current_col) != (end_row, end_col):
-        path.append(end)
-    
+        visited_in_path.add(new_node)
+
+    # The path ends where it ends, either by reaching the target or by getting trapped.
+    # The deterministic rescue walk is no longer needed with the new logic.
     return path
 
 
@@ -652,7 +655,7 @@ def _process_free_world_pair_worker(start, end, maze_size, direction_to_offset):
         sequence = _path_to_sequence_static(path, maze_size, direction_to_offset)
         return {
             'start_node': start,
-            'end_node': end,
+            'end_node': path[-1],  # Use the actual end node from the path
             'path': path,
             'sequence': sequence,
             'length': len(sequence)
@@ -682,12 +685,33 @@ def main():
     else:
         config.output_dir = output_dir
     
+    os.makedirs(config.output_dir, exist_ok=True)
+    
+    # Setup Logging
+    log_file = os.path.join(config.output_dir, f"generation_{config.maze_size}x{config.maze_size}_{time.strftime('%Y%m%d-%H%M%S')}.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
+    logging.info("="*50)
+    logging.info("STARTING MAZE NAVIGATION DATASET GENERATION")
+    logging.info("="*50)
+    logging.info("Configuration:")
+    for key, value in vars(config).items():
+        logging.info(f"  {key}: {value}")
+    logging.info("-" * 50)
+
     generator = MazeNavDataGenerator(config)
     dataset = generator.generate_data()
     train_tokens, val_tokens = generator.save_all_files(dataset)
     
     # Generate visualizations
-    print("\nGenerating visualizations...")
+    logging.info("\nGenerating visualizations...")
     
     # Maze visualization with node labels
     maze_viz_path = os.path.join(config.output_dir, f"maze_with_labels_{config.maze_size}x{config.maze_size}.png")
@@ -698,30 +722,35 @@ def main():
     generator.visualize_sample_paths(dataset, num_samples=3, save_path=paths_viz_path)
     
     # Print summary
-    print("\n" + "="*50)
-    print(f"{'FREE WORLD' if config.free_world_mode else 'MAZE'} NAVIGATION DATASET SUMMARY")
-    print("="*50)
-    print(f"Mode: {'Free World (No Walls)' if config.free_world_mode else 'Maze'}")
-    print(f"Grid size: {config.maze_size}x{config.maze_size}")
-    print(f"Total nodes: {dataset['maze_data']['num_nodes']}")
-    print(f"Vocabulary size: {dataset['config']['vocab_size']}")
+    summary = "\n" + "="*50
+    summary += f"\n{'FREE WORLD' if config.free_world_mode else 'MAZE'} NAVIGATION DATASET SUMMARY"
+    summary += "\n" + "="*50
+    summary += f"\nMode: {'Free World (No Walls)' if config.free_world_mode else 'Maze'}"
+    summary += f"\nGrid size: {config.maze_size}x{config.maze_size}"
+    summary += f"\nTotal nodes: {dataset['maze_data']['num_nodes']}"
+    summary += f"\nVocabulary size: {dataset['config']['vocab_size']}"
     if config.free_world_mode:
-        print(f"Random paths generated: {config.num_random_paths}")
-    print(f"Training sequences: {dataset['stats']['train_pairs']}")
-    print(f"Test sequences: {dataset['stats']['test_pairs']}")
-    print(f"Average sequence length: {dataset['stats']['avg_train_length']:.1f}")
-    print(f"Max sequence length: {dataset['stats']['max_sequence_length']}")
-    print(f"Training tokens: {train_tokens:,}")
-    print(f"Validation tokens: {val_tokens:,}")
-    print(f"Files saved to: {config.output_dir}/")
+        summary += f"\nRandom paths generated: {config.num_random_paths}"
+    summary += f"\nTraining sequences: {dataset['stats']['train_pairs']}"
+    summary += f"\nTest sequences: {dataset['stats']['test_pairs']}"
+    summary += f"\nAverage sequence length: {dataset['stats']['avg_train_length']:.1f}"
+    summary += f"\nMax sequence length: {dataset['stats']['max_sequence_length']}"
+    summary += f"\nTraining tokens: {train_tokens:,}"
+    summary += f"\nValidation tokens: {val_tokens:,}"
+    summary += f"\nFiles saved to: {config.output_dir}/"
     
     # Show visualization info
-    print(f"\nVisualizations generated:")
-    print(f"  Maze with node labels: {maze_viz_path}")
-    print(f"  Sample navigation paths:")
+    summary += f"\n\nVisualizations generated:"
+    summary += f"\n  Maze with node labels: {maze_viz_path}"
+    summary += f"\n  Sample navigation paths:"
     for i in range(3):
         detail_path = paths_viz_path.replace('.png', f'_detail_{i+1}.png')
-        print(f"    - Navigation detail {i+1}: {detail_path}")
+        summary += f"\n    - Navigation detail {i+1}: {detail_path}"
+    logging.info(summary)
+
+    logging.info("\n" + "="*50)
+    logging.info("DATASET GENERATION COMPLETE")
+    logging.info("="*50)
 
 
 if __name__ == "__main__":

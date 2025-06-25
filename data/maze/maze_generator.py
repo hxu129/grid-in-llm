@@ -17,12 +17,34 @@ from dataclasses import dataclass
 class MazeConfig:
     """Configuration for maze generation."""
     size: int  # Square maze size (size x size)
-    algorithm: str = 'dfs'  # Algorithm to use: 'dfs' or 'wilson'
+    algorithm: str = 'dfs'  # Algorithm to use: 'dfs', 'wilson', or 'kruskal'
     start_pos: Optional[Tuple[int, int]] = None  # (row, col), None for random
     end_pos: Optional[Tuple[int, int]] = None    # (row, col), None for random
     seed: Optional[int] = None
     visualize: bool = False  # Whether to create visualization
     save_visualization: bool = False  # Whether to save visualization to file
+
+
+class _DisjointSetUnion:
+    """Helper class for the Disjoint Set Union (DSU) data structure."""
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+        self.num_sets = n
+
+    def find(self, i: int) -> int:
+        if self.parent[i] == i:
+            return i
+        self.parent[i] = self.find(self.parent[i])
+        return self.parent[i]
+
+    def union(self, i: int, j: int) -> bool:
+        root_i = self.find(i)
+        root_j = self.find(j)
+        if root_i != root_j:
+            self.parent[root_i] = root_j
+            self.num_sets -= 1
+            return True
+        return False
 
 
 class MazeGenerator:
@@ -33,8 +55,8 @@ class MazeGenerator:
     def __init__(self, config: MazeConfig):
         self.config = config
         self.size = config.size
-        if config.algorithm not in ['dfs', 'wilson']:
-            raise ValueError(f"Invalid algorithm: {config.algorithm}. Choose 'dfs' or 'wilson'.")
+        if config.algorithm not in ['dfs', 'wilson', 'kruskal']:
+            raise ValueError(f"Invalid algorithm: {config.algorithm}. Choose 'dfs', 'wilson', or 'kruskal'.")
 
         if config.seed is not None:
             random.seed(config.seed)
@@ -74,6 +96,8 @@ class MazeGenerator:
             edges = self._generate_dfs_edges()
         elif self.config.algorithm == 'wilson':
             edges = self._generate_wilson_edges()
+        elif self.config.algorithm == 'kruskal':
+            edges = self._generate_kruskal_edges()
         else:
             raise ValueError(f"Unknown algorithm: {self.config.algorithm}")
 
@@ -156,6 +180,37 @@ class MazeGenerator:
                 node1 = self._cell_to_node_id(cell1[0], cell1[1])
                 node2 = self._cell_to_node_id(cell2[0], cell2[1])
                 edges.add((min(node1, node2), max(node1, node2)))
+        
+        return edges
+
+    def _generate_kruskal_edges(self) -> Set[Tuple[int, int]]:
+        """Generate maze edges using Randomized Kruskal's algorithm."""
+        num_nodes = self.size * self.size
+        dsu = _DisjointSetUnion(num_nodes)
+        edges = set()
+        
+        # Create a list of all possible edges
+        all_possible_edges = []
+        for r in range(self.size):
+            for c in range(self.size):
+                node1 = self._cell_to_node_id(r, c)
+                # Add edge to the right
+                if c + 1 < self.size:
+                    node2 = self._cell_to_node_id(r, c + 1)
+                    all_possible_edges.append((node1, node2))
+                # Add edge down
+                if r + 1 < self.size:
+                    node2 = self._cell_to_node_id(r + 1, c)
+                    all_possible_edges.append((node1, node2))
+        
+        # Randomize the order of edges
+        random.shuffle(all_possible_edges)
+        
+        for node1, node2 in all_possible_edges:
+            if dsu.union(node1, node2):
+                edges.add((min(node1, node2), max(node1, node2)))
+                if len(edges) == num_nodes - 1:
+                    break
         
         return edges
 
