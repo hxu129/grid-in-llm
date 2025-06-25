@@ -131,7 +131,7 @@ def plot_neuron_heatmaps(
         if maze_data is not None:
             adj_matrix = np.array(maze_data['adjacency_matrix'])
             wall_color = '#2C3E50'
-            wall_lw = 5  if grid_size <= 24 else 1 # Increased wall thickness
+            wall_lw = 5  if grid_size <= 24 else (1 if grid_size <= 48 else 0.5) # Increased wall thickness
 
             for r in range(grid_size):
                 for c in range(grid_size):
@@ -245,7 +245,7 @@ def plot_single_neuron_heatmap(
     if maze_data is not None:
         adj_matrix = np.array(maze_data['adjacency_matrix'])
         wall_color = '#2C3E50'
-        wall_lw = 5  if grid_size <= 24 else 1 # Increased wall thickness
+        wall_lw = 5  if grid_size <= 24 else (1 if grid_size <= 48 else 0.5) # Increased wall thickness
 
         for r in range(grid_size):
             for c in range(grid_size):
