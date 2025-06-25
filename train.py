@@ -364,6 +364,20 @@ elif init_from.startswith('gpt2'):
 # No need to crop model since we use sinusoidal embeddings
 model.to(device)
 
+if master_process:
+    # Log training and model parameters
+    dataset_name = dataset.split('/')[-1]
+    log_file_path = os.path.join(out_dir, f'log_{maze_size}_{dataset_name}.txt')
+    with open(log_file_path, 'w') as f:
+        f.write("--- Training Parameters ---\n")
+        for key, value in config.items():
+            f.write(f'{key}: {value}\n')
+        f.write("\n--- Model Parameters ---\n")
+        for key, value in model_args.items():
+            f.write(f'{key}: {value}\n')
+        f.write("\n--- Training Log ---\n")
+    print(f"Parameters logged to {log_file_path}")
+
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
@@ -443,6 +457,8 @@ while True:
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        with open(log_file_path, 'a') as f:
+            f.write(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}\n")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -506,6 +522,8 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        with open(log_file_path, 'a') as f:
+            f.write(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%\n")
     iter_num += 1
     local_iter_num += 1
 
