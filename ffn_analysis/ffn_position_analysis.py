@@ -21,7 +21,7 @@ class FFNActivationCollector:
     Focuses on intermediate activations (after GELU, before second linear layer).
     """
     
-    def __init__(self, model_path: str = '../out-maze-nav', grid_size: int = 8):
+    def __init__(self, model_path: str = '../out-maze-nav', grid_size: int = 8, task: str = 'maze'):
         """
         Initialize the activation collector.
         
@@ -36,6 +36,7 @@ class FFNActivationCollector:
         # Get the directory where this script is located
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.project_root = os.path.dirname(self.script_dir)  # Parent directory
+        self.task = task
         
         # Load model and setup
         self.model, self.tokenizer = self._load_model(model_path)
@@ -54,7 +55,8 @@ class FFNActivationCollector:
     def _load_model(self, model_path: str) -> Tuple[GPT, object]:
         """Load the trained maze navigation model and tokenizer."""
         # Load model (following logit_lens.ipynb pattern)
-        ckpt_path = os.path.join(model_path, 'ckpt.pt')
+        post_fix = 'path_int_data' if self.task == 'path' else 'maze_nav_data'
+        ckpt_path = os.path.join(model_path, f'ckpt_{self.grid_size}_{post_fix}.pt')
         checkpoint = torch.load(ckpt_path, map_location=self.device)
         gptconf = GPTConfig(**checkpoint['model_args'])
         model = GPT(gptconf)
@@ -109,7 +111,12 @@ class FFNActivationCollector:
                             max_samples: int = 100) -> List[List[int]]:
         """Load validation data following logit_lens.ipynb pattern."""
         if val_path is None:
-            val_path = os.path.join(self.project_root, "data", "maze", "maze_nav_data", f"train_{self.grid_size}.bin")
+            if self.task == 'maze':
+                val_path = os.path.join(self.project_root, "data", "maze", "maze_nav_data", f"val_{self.grid_size}.bin")
+            elif self.task == 'path':
+                val_path = os.path.join(self.project_root, "data", "maze", "path_int_data", f"val_{self.grid_size}.bin")
+            else:
+                raise ValueError(f"Invalid task: {self.task}")
         
         val_data = np.fromfile(val_path, dtype=np.uint16)
         
