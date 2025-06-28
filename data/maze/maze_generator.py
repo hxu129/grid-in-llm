@@ -55,8 +55,8 @@ class MazeGenerator:
     def __init__(self, config: MazeConfig):
         self.config = config
         self.size = config.size
-        if config.algorithm not in ['dfs', 'wilson', 'kruskal']:
-            raise ValueError(f"Invalid algorithm: {config.algorithm}. Choose 'dfs', 'wilson', or 'kruskal'.")
+        if config.algorithm not in ['dfs', 'wilson', 'kruskal', 'serpentine']:
+            raise ValueError(f"Invalid algorithm: {config.algorithm}. Choose 'dfs', 'wilson', 'kruskal', or 'serpentine'.")
 
         if config.seed is not None:
             random.seed(config.seed)
@@ -98,6 +98,8 @@ class MazeGenerator:
             edges = self._generate_wilson_edges()
         elif self.config.algorithm == 'kruskal':
             edges = self._generate_kruskal_edges()
+        elif self.config.algorithm == 'serpentine':
+            edges = self._generate_serpentine_edges()
         else:
             raise ValueError(f"Unknown algorithm: {self.config.algorithm}")
 
@@ -211,6 +213,41 @@ class MazeGenerator:
                 edges.add((min(node1, node2), max(node1, node2)))
                 if len(edges) == num_nodes - 1:
                     break
+        
+        return edges
+
+    def _generate_serpentine_edges(self) -> Set[Tuple[int, int]]:
+        """
+        Generate maze edges in a deterministic, serpentine (snake-like) pattern.
+        The path goes up on even columns and down on odd columns.
+        """
+        edges = set()
+
+        for c in range(self.size):
+            # Vertical connections within columns
+            if c % 2 == 0:  # Even columns (0, 2, ...): path goes up
+                for r in range(self.size - 1, 0, -1):
+                    node1 = self._cell_to_node_id(r, c)
+                    node2 = self._cell_to_node_id(r - 1, c)
+                    edges.add((min(node1, node2), max(node1, node2)))
+            else:  # Odd columns (1, 3, ...): path goes down
+                for r in range(self.size - 1):
+                    node1 = self._cell_to_node_id(r, c)
+                    node2 = self._cell_to_node_id(r + 1, c)
+                    edges.add((min(node1, node2), max(node1, node2)))
+
+        # Horizontal connections between columns
+        for c in range(self.size - 1):
+            if c % 2 == 0:  # Connect at the top for even columns
+                r = 0
+                node1 = self._cell_to_node_id(r, c)
+                node2 = self._cell_to_node_id(r, c + 1)
+                edges.add((min(node1, node2), max(node1, node2)))
+            else:  # Connect at the bottom for odd columns
+                r = self.size - 1
+                node1 = self._cell_to_node_id(r, c)
+                node2 = self._cell_to_node_id(r, c + 1)
+                edges.add((min(node1, node2), max(node1, node2)))
         
         return edges
 
