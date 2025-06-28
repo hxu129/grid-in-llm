@@ -17,11 +17,34 @@ from dataclasses import dataclass
 class MazeConfig:
     """Configuration for maze generation."""
     size: int  # Square maze size (size x size)
+    algorithm: str = 'dfs'  # Algorithm to use: 'dfs', 'wilson', or 'kruskal'
     start_pos: Optional[Tuple[int, int]] = None  # (row, col), None for random
     end_pos: Optional[Tuple[int, int]] = None    # (row, col), None for random
     seed: Optional[int] = None
     visualize: bool = False  # Whether to create visualization
     save_visualization: bool = False  # Whether to save visualization to file
+
+
+class _DisjointSetUnion:
+    """Helper class for the Disjoint Set Union (DSU) data structure."""
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+        self.num_sets = n
+
+    def find(self, i: int) -> int:
+        if self.parent[i] == i:
+            return i
+        self.parent[i] = self.find(self.parent[i])
+        return self.parent[i]
+
+    def union(self, i: int, j: int) -> bool:
+        root_i = self.find(i)
+        root_j = self.find(j)
+        if root_i != root_j:
+            self.parent[root_i] = root_j
+            self.num_sets -= 1
+            return True
+        return False
 
 
 class MazeGenerator:
@@ -32,6 +55,9 @@ class MazeGenerator:
     def __init__(self, config: MazeConfig):
         self.config = config
         self.size = config.size
+        if config.algorithm not in ['dfs', 'wilson', 'kruskal', 'serpentine']:
+            raise ValueError(f"Invalid algorithm: {config.algorithm}. Choose 'dfs', 'wilson', 'kruskal', or 'serpentine'.")
+
         if config.seed is not None:
             random.seed(config.seed)
             np.random.seed(config.seed)
@@ -63,78 +89,199 @@ class MazeGenerator:
     
     def generate_maze(self) -> Dict:
         """
-        Generate a maze without cycles using DFS.
+        Generate a maze using the configured algorithm.
         Returns maze data including adjacency matrix and metadata.
         """
-        # Initialize visited set and edges
+        if self.config.algorithm == 'dfs':
+            edges = self._generate_dfs_edges()
+        elif self.config.algorithm == 'wilson':
+            edges = self._generate_wilson_edges()
+        elif self.config.algorithm == 'kruskal':
+            edges = self._generate_kruskal_edges()
+        elif self.config.algorithm == 'serpentine':
+            edges = self._generate_serpentine_edges()
+        else:
+            raise ValueError(f"Unknown algorithm: {self.config.algorithm}")
+
+        return self._finalize_maze_data(edges)
+
+    def _generate_dfs_edges(self) -> Set[Tuple[int, int]]:
+        """Generate maze edges using Depth-First Search (DFS)."""
         visited = set()
-        edges = set()  # Set of (node1, node2) tuples representing connections
+        edges = set()
         
-        # Choose start position
         if self.config.start_pos is None:
-            start_row = random.randint(0, self.size - 1)
-            start_col = random.randint(0, self.size - 1)
+            start_row, start_col = random.randint(0, self.size - 1), random.randint(0, self.size - 1)
         else:
             start_row, start_col = self.config.start_pos
         
         if not self._is_valid_cell(start_row, start_col):
-            raise ValueError(f"Invalid start position: ({start_row}, {start_col})")
-        
-        # DFS to create maze without cycles
+            raise ValueError(f"Invalid start position for DFS: ({start_row}, {start_col})")
+
         stack = [(start_row, start_col)]
         visited.add((start_row, start_col))
         
         while stack:
-            current_row, current_col = stack.pop()
+            current_row, current_col = stack[-1]
             
-            # Get unvisited neighbors
             neighbors = self._get_neighbors(current_row, current_col)
-            unvisited_neighbors = [(r, c) for r, c in neighbors if (r, c) not in visited]
+            unvisited_neighbors = [n for n in neighbors if n not in visited]
             
             if unvisited_neighbors:
-                # Put current cell back on stack
-                stack.append((current_row, current_col))
-                
-                # Choose random unvisited neighbor
                 next_row, next_col = random.choice(unvisited_neighbors)
                 visited.add((next_row, next_col))
                 
-                # Add edge (both directions for undirected graph)
                 node1 = self._cell_to_node_id(current_row, current_col)
                 node2 = self._cell_to_node_id(next_row, next_col)
                 edges.add((min(node1, node2), max(node1, node2)))
                 
-                # Continue from new cell
                 stack.append((next_row, next_col))
+            else:
+                stack.pop()
         
-        # Choose end position (must be different from start and reachable)
-        reachable_cells = list(visited)
+        return edges
+
+    def _generate_wilson_edges(self) -> Set[Tuple[int, int]]:
+        """
+        Generate maze edges using Wilson's algorithm for a uniform spanning tree.
+        """
+        all_cells = [(r, c) for r in range(self.size) for c in range(self.size)]
+        maze_cells = set()
+        edges = set()
+
+        # Start with one random cell in the maze
+        first_cell = random.choice(all_cells)
+        maze_cells.add(first_cell)
+        
+        while len(maze_cells) < len(all_cells):
+            # Pick a random starting cell not yet in the maze
+            start_cell = random.choice(all_cells)
+            while start_cell in maze_cells:
+                start_cell = random.choice(all_cells)
+            
+            # Perform a random walk
+            path = [start_cell]
+            current_cell = start_cell
+            
+            while current_cell not in maze_cells:
+                neighbors = self._get_neighbors(current_cell[0], current_cell[1])
+                next_cell = random.choice(neighbors)
+                
+                # If the walk intersects itself, erase the loop
+                if next_cell in path:
+                    path = path[:path.index(next_cell) + 1]
+                else:
+                    path.append(next_cell)
+                current_cell = next_cell
+            
+            # Add the loop-erased path to the maze
+            for i in range(len(path) - 1):
+                cell1, cell2 = path[i], path[i+1]
+                maze_cells.add(cell1)
+                
+                node1 = self._cell_to_node_id(cell1[0], cell1[1])
+                node2 = self._cell_to_node_id(cell2[0], cell2[1])
+                edges.add((min(node1, node2), max(node1, node2)))
+        
+        return edges
+
+    def _generate_kruskal_edges(self) -> Set[Tuple[int, int]]:
+        """Generate maze edges using Randomized Kruskal's algorithm."""
+        num_nodes = self.size * self.size
+        dsu = _DisjointSetUnion(num_nodes)
+        edges = set()
+        
+        # Create a list of all possible edges
+        all_possible_edges = []
+        for r in range(self.size):
+            for c in range(self.size):
+                node1 = self._cell_to_node_id(r, c)
+                # Add edge to the right
+                if c + 1 < self.size:
+                    node2 = self._cell_to_node_id(r, c + 1)
+                    all_possible_edges.append((node1, node2))
+                # Add edge down
+                if r + 1 < self.size:
+                    node2 = self._cell_to_node_id(r + 1, c)
+                    all_possible_edges.append((node1, node2))
+        
+        # Randomize the order of edges
+        random.shuffle(all_possible_edges)
+        
+        for node1, node2 in all_possible_edges:
+            if dsu.union(node1, node2):
+                edges.add((min(node1, node2), max(node1, node2)))
+                if len(edges) == num_nodes - 1:
+                    break
+        
+        return edges
+
+    def _generate_serpentine_edges(self) -> Set[Tuple[int, int]]:
+        """
+        Generate maze edges in a deterministic, serpentine (snake-like) pattern.
+        The path goes up on even columns and down on odd columns.
+        """
+        edges = set()
+
+        for c in range(self.size):
+            # Vertical connections within columns
+            if c % 2 == 0:  # Even columns (0, 2, ...): path goes up
+                for r in range(self.size - 1, 0, -1):
+                    node1 = self._cell_to_node_id(r, c)
+                    node2 = self._cell_to_node_id(r - 1, c)
+                    edges.add((min(node1, node2), max(node1, node2)))
+            else:  # Odd columns (1, 3, ...): path goes down
+                for r in range(self.size - 1):
+                    node1 = self._cell_to_node_id(r, c)
+                    node2 = self._cell_to_node_id(r + 1, c)
+                    edges.add((min(node1, node2), max(node1, node2)))
+
+        # Horizontal connections between columns
+        for c in range(self.size - 1):
+            if c % 2 == 0:  # Connect at the top for even columns
+                r = 0
+                node1 = self._cell_to_node_id(r, c)
+                node2 = self._cell_to_node_id(r, c + 1)
+                edges.add((min(node1, node2), max(node1, node2)))
+            else:  # Connect at the bottom for odd columns
+                r = self.size - 1
+                node1 = self._cell_to_node_id(r, c)
+                node2 = self._cell_to_node_id(r, c + 1)
+                edges.add((min(node1, node2), max(node1, node2)))
+        
+        return edges
+
+    def _finalize_maze_data(self, edges: Set[Tuple[int, int]]) -> Dict:
+        """Build the final maze data structure from a set of edges."""
+        # Determine start position
+        if self.config.start_pos is None:
+            start_row, start_col = random.randint(0, self.size - 1), random.randint(0, self.size - 1)
+        else:
+            start_row, start_col = self.config.start_pos
+        if not self._is_valid_cell(start_row, start_col):
+            raise ValueError(f"Invalid start position: ({start_row}, {start_col})")
+
+        # Determine end position
         if self.config.end_pos is None:
-            # Remove start position from candidates
-            end_candidates = [cell for cell in reachable_cells if cell != (start_row, start_col)]
+            all_cells = [(r, c) for r in range(self.size) for c in range(self.size)]
+            end_candidates = [cell for cell in all_cells if cell != (start_row, start_col)]
             if not end_candidates:
-                raise ValueError("Cannot find valid end position")
+                raise ValueError("Cannot find a valid end position different from the start.")
             end_row, end_col = random.choice(end_candidates)
         else:
             end_row, end_col = self.config.end_pos
-            if not self._is_valid_cell(end_row, end_col):
-                raise ValueError(f"Invalid end position: ({end_row}, {end_col})")
-            if (end_row, end_col) not in visited:
-                raise ValueError(f"End position ({end_row}, {end_col}) is not reachable from start")
-        
+        if not self._is_valid_cell(end_row, end_col):
+            raise ValueError(f"Invalid end position: ({end_row}, {end_col})")
+
         # Build adjacency matrix
         num_nodes = self.size * self.size
         adjacency_matrix = np.zeros((num_nodes, num_nodes), dtype=int)
-        
         for node1, node2 in edges:
             adjacency_matrix[node1][node2] = 1
-            adjacency_matrix[node2][node1] = 1  # Undirected graph
-        
+            adjacency_matrix[node2][node1] = 1
+
         # Create node position mapping
-        node_positions = {}
-        for node_id in range(num_nodes):
-            row, col = self._node_id_to_cell(node_id)
-            node_positions[node_id] = {'row': row, 'col': col}
+        node_positions = {i: {'row': r, 'col': c} for i, (r, c) in enumerate( (self._node_id_to_cell(i) for i in range(num_nodes)) )}
         
         start_node = self._cell_to_node_id(start_row, start_col)
         end_node = self._cell_to_node_id(end_row, end_col)
@@ -142,6 +289,7 @@ class MazeGenerator:
         maze_data = {
             'config': {
                 'size': self.size,
+                'algorithm': self.config.algorithm,
                 'start_pos': [start_row, start_col],
                 'end_pos': [end_row, end_col],
                 'seed': self.config.seed
@@ -152,7 +300,7 @@ class MazeGenerator:
             'end_node': end_node,
             'num_nodes': num_nodes,
             'num_edges': len(edges),
-            'reachable_cells': len(visited)
+            'reachable_cells': num_nodes # Both algorithms connect the whole maze
         }
         
         return maze_data

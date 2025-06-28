@@ -16,7 +16,7 @@ from typing import List, Dict, Tuple, Optional, Union
 class PathVisualizer:
     """Visualizes generated paths on maze grids."""
     
-    def __init__(self, maze_size: int = 15, maze_data_dir: str = "data/maze/maze_nav_data"):
+    def __init__(self, maze_size, maze_data_dir: str = "data/maze/maze_nav_data"):
         """
         Initialize the path visualizer.
         
@@ -46,72 +46,16 @@ class PathVisualizer:
     def _load_maze_data(self):
         """Load maze data and metadata from files based on maze size."""
         try:
-            # First, check if we have size-specific files
-            meta_filename = f'meta_{self.maze_size}.pkl'
-            meta_path = os.path.join(self.maze_data_dir, meta_filename)
-            dataset_filename = f'maze_nav_dataset_{self.maze_size}.json'
-            dataset_path = os.path.join(self.maze_data_dir, dataset_filename)
-            
-            # If we don't have both size-specific files, try generation or fallback
-            if not (os.path.exists(meta_path) and os.path.exists(dataset_path)):
-                print(f"Size-specific files not found for {self.maze_size}x{self.maze_size} maze.")
-                
-                # Check if we have the exact meta file for this size
-                if os.path.exists(meta_path):
-                    print(f"Found meta file for {self.maze_size}x{self.maze_size}, generating maze data...")
-                    self._generate_maze_data()
-                    return
-                else:
-                    # Try to find any available meta file and warn about fallback
-                    available_meta = []
-                    if os.path.exists(self.maze_data_dir):
-                        available_meta = [f for f in os.listdir(self.maze_data_dir) if f.startswith('meta_') and f.endswith('.pkl')]
-                    
-                    if available_meta:
-                        print(f"No meta file found for size {self.maze_size}. Available sizes: {[f.split('_')[1].split('.')[0] for f in available_meta]}")
-                        print("Generating new maze data...")
-                        self._generate_maze_data()
-                        return
-                    else:
-                        # Fall back to default files
-                        print(f"No size-specific files found. Trying default files...")
-                        meta_path = os.path.join(self.maze_data_dir, 'meta.pkl')
-                        dataset_path = os.path.join(self.maze_data_dir, 'maze_nav_dataset.json')
-            
             # Load metadata
-            if not os.path.exists(meta_path):
-                raise FileNotFoundError(f"No meta file found at {meta_path}")
-                
+            meta_path = os.path.join(self.maze_data_dir, f'meta_{self.maze_size}.pkl')
             with open(meta_path, 'rb') as f:
                 self.meta = pickle.load(f)
             
-            # Check if the loaded meta matches our desired maze size
-            if 'config' in self.meta and 'maze_size' in self.meta['config']:
-                loaded_size = self.meta['config']['maze_size']
-                if loaded_size != self.maze_size:
-                    print(f"Note: Meta file contains {loaded_size}x{loaded_size} maze, but {self.maze_size}x{self.maze_size} was requested.")
-                    print("Generating new maze data for the requested size...")
-                    self._generate_maze_data()
-                    return
-            
-            # Load dataset
-            if not os.path.exists(dataset_path):
-                print(f"Dataset file not found. Generating maze data for {self.maze_size}x{self.maze_size}...")
-                self._generate_maze_data()
-                return
-                
+            # Load maze dataset
+            dataset_path = os.path.join(self.maze_data_dir, f'maze_nav_dataset_{self.maze_size}.json')
             with open(dataset_path, 'r') as f:
                 dataset = json.load(f)
                 self.maze_data = dataset['maze_data']
-                
-                # Verify the dataset matches our maze size
-                if 'config' in dataset and 'maze_size' in dataset['config']:
-                    dataset_size = dataset['config']['maze_size']
-                    if dataset_size != self.maze_size:
-                        print(f"Dataset contains {dataset_size}x{dataset_size} maze, but {self.maze_size}x{self.maze_size} was requested.")
-                        print("Generating new maze data for the requested size...")
-                        self._generate_maze_data()
-                        return
             
             print(f"Loaded maze data: {self.maze_size}x{self.maze_size} maze with {self.maze_data['num_nodes']} nodes")
             
@@ -281,7 +225,7 @@ class PathVisualizer:
                 # Add text label with node ID
                 ax.text(grid_col, grid_row, str(node_id), 
                        ha='center', va='center', 
-                       fontsize=9, color='black', weight='bold',
+                       fontsize=9 if self.maze_size <= 24 else 4, color='black', weight='bold',
                        bbox=dict(boxstyle="round,pad=0.2", 
                                facecolor='yellow', alpha=0.8, edgecolor='black', linewidth=0.5),
                        zorder=3)
@@ -391,7 +335,7 @@ class PathVisualizer:
 
 # Example usage and utility functions
 def visualize_generated_path(path_string: str, 
-                           maze_size: int = 15,
+                           maze_size: int,
                            maze_data_dir: str = "data/maze/maze_nav_data",
                            title: str = None,
                            save_path: str = None,

@@ -3,7 +3,7 @@
 
 # I/O
 out_dir = 'out-maze-nav'
-maze_size = 8
+maze_size = 30
 eval_interval = 250
 log_interval = 10
 eval_iters = 100
@@ -17,29 +17,29 @@ wandb_run_name = 'maze-nav-gpt'
 
 # data
 dataset = 'maze/maze_nav_data'  # This should match your maze data directory
-gradient_accumulation_steps = 1  # Must be divisible by number of GPUs for DDP
-batch_size = 16  # Reduced batch size for safety
-max_seq_len = 1000  # Reasonable maximum sequence length for maze paths
+gradient_accumulation_steps = 3  # Reduced for smaller sequences
+batch_size = 16  # Reasonable batch size for path learning
+max_seq_len = maze_size ** 2 * 2 + 3  # Maximum sequence length for any path (no artificial limit)
 
 # model - smaller model suitable for maze navigation
-n_layer = 1   # Fewer layers for simpler task
-n_head = 1    # Fewer attention heads
-n_embd = 16  # Smaller embedding dimension
+n_layer = 9   # Fewer layers for simpler task
+n_head = 6    # Fewer attention heads
+n_embd = 126  # Smaller embedding dimension
 dropout = 0.1 # Some dropout for regularization
-bias = False  # Cleaner model
+bias = True  # Cleaner model
 
 # adamw optimizer
-learning_rate = 3e-4  # Slightly higher learning rate
-max_iters = 5000      # Fewer iterations needed
-weight_decay = 1e-1
+learning_rate = 3e-3  # Lower learning rate for stability
+max_iters = 9000      # Fewer iterations needed
+weight_decay = 0.1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0
 
 # learning rate decay settings
 decay_lr = True
-warmup_iters = 100    # Quick warmup
-lr_decay_iters = 5000 # Match max_iters
+warmup_iters = 300    # Quick warmup
+lr_decay_iters = 9000 # Match max_iters
 min_lr = 3e-5
 
 # DDP settings

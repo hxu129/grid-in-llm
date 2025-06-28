@@ -1,8 +1,54 @@
+"""
+Enhanced FFN Analysis Visualization with Maze Overlay
+
+This module provides visualization tools for FFN activation analysis with support for
+overlaying activation heatmaps on actual maze structures for more intuitive interpretation.
+
+Key Features:
+- Traditional grid-based heatmaps
+- NEW: Maze overlay heatmaps showing activations on actual maze structure
+- Row/column coordinate labels for precise position reference
+- Layer-wise analysis and comparison
+- Neuron specialization analysis
+- Single neuron detailed views
+
+Usage:
+    # Run complete analysis with both traditional and maze overlay visualizations
+    python visualize_ffn_analysis.py
+    
+    # Or use individual functions programmatically
+    from visualize_ffn_analysis import load_ffn_analysis_results, visualize_all_layers_with_maze
+    results = load_ffn_analysis_results()
+    visualize_all_layers_with_maze(results)
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
-from neuron_heatmap_visualizer import plot_neuron_heatmaps, plot_single_neuron_heatmap
 from typing import Dict, List, Optional
 import os
+import json
+import sys
+from matplotlib.colors import ListedColormap, LinearSegmentedColormap
+import matplotlib.patches as patches
+
+# Setup paths for imports
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.append(project_root)  # For neuron_heatmap_visualizer
+
+# Add data/maze to path for maze imports
+maze_path = os.path.join(project_root, 'data', 'maze')
+sys.path.append(maze_path)
+
+from neuron_heatmap_visualizer import plot_neuron_heatmaps, plot_single_neuron_heatmap
+
+try:
+    from maze_visualizer import MazeVisualizer
+    MAZE_VISUALIZER_AVAILABLE = True
+except ImportError:
+    print("Warning: MazeVisualizer not available. Maze overlay functionality will be limited.")
+    MAZE_VISUALIZER_AVAILABLE = False
+    MazeVisualizer = None
 
 def load_ffn_analysis_results(results_path: str = "ffn_position_analysis_results.npz") -> Dict:
     """Load the FFN analysis results."""
@@ -34,6 +80,231 @@ def load_ffn_analysis_results(results_path: str = "ffn_position_analysis_results
         'metadata': metadata,
         'layer_matrices': layer_matrices
     }
+
+def load_maze_data(grid_size: int, maze_data_dir: str = "data/maze/maze_nav_data") -> Dict:
+    """Load maze structure data for the given grid size."""
+    try:
+        # Use the already defined project_root from module initialization
+        # Get the directory where this script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(script_dir)  # Parent directory (project root)
+        
+        # Build absolute path to maze dataset
+        dataset_path = os.path.join(project_root, maze_data_dir, f'maze_nav_dataset_{grid_size}.json')
+        
+        if not os.path.exists(dataset_path):
+            raise FileNotFoundError(f"Maze dataset not found: {dataset_path}")
+        
+        with open(dataset_path, 'r') as f:
+            dataset = json.load(f)
+            
+        maze_data = dataset['maze_data']
+        print(f"Loaded maze data: {grid_size}x{grid_size} maze with {maze_data['num_nodes']} nodes")
+        return maze_data
+        
+    except Exception as e:
+        print(f"Error loading maze data: {e}")
+        print("Falling back to simple grid visualization without maze structure.")
+        return None
+
+def create_maze_overlay_heatmap(activation_matrix: np.ndarray, neuron_idx: int, 
+                               maze_data: Dict, grid_size: int,
+                               title: str = None, figsize: tuple = (10, 8),
+                               cmap: str = 'RdYlBu_r', alpha: float = 0.9) -> plt.Figure:
+    """
+    Create a heatmap overlaid on the actual maze structure by drawing walls as lines.
+    
+    Args:
+        activation_matrix: Matrix of shape (n_positions, n_neurons)
+        neuron_idx: Index of neuron to visualize
+        maze_data: Maze structure data from dataset
+        grid_size: Size of the grid
+        title: Custom title for the plot
+        figsize: Figure size
+        cmap: Colormap for activation heatmap
+        alpha: Transparency of activation overlay
+    
+    Returns:
+        matplotlib Figure object
+    """
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    
+    # 1. Prepare activation data for a continuous heatmap
+    neuron_activations = activation_matrix[:, neuron_idx]
+    activation_grid = neuron_activations.reshape((grid_size, grid_size))
+    
+    # Mask NaN values to prevent them from being plotted
+    masked_activations = np.ma.masked_where(np.isnan(activation_grid), activation_grid)
+    
+    # 2. Draw the continuous activation heatmap
+    # The 'extent' argument maps the grid to data coordinates.
+    im = ax.imshow(masked_activations, cmap=cmap, origin='lower', 
+                  interpolation='nearest', alpha=alpha,
+                  extent=(-0.5, grid_size - 0.5, -0.5, grid_size - 0.5))
+    
+    # 3. Draw maze walls as lines based on adjacency matrix
+    if maze_data is not None:
+        adj_matrix = np.array(maze_data['adjacency_matrix'])
+        wall_color = '#2C3E50'  # Dark, clear wall color
+        wall_lw = 5  if grid_size <= 24 else (1 if grid_size <= 48 else 0.5) # Increased wall thickness
+        
+        for r in range(grid_size):
+            for c in range(grid_size):
+                node_id = r * grid_size + c
+                
+                # Check for wall to the right
+                if c < grid_size - 1:
+                    neighbor_id = r * grid_size + (c + 1)
+                    if adj_matrix[node_id, neighbor_id] == 0:
+                        ax.plot([c + 0.5, c + 0.5], [r - 0.5, r + 0.5], color=wall_color, linewidth=wall_lw)
+                
+                # Check for wall below (or above in 'lower' origin)
+                if r < grid_size - 1:
+                    neighbor_id = (r + 1) * grid_size + c
+                    if adj_matrix[node_id, neighbor_id] == 0:
+                        ax.plot([c - 0.5, c + 0.5], [r + 0.5, r + 0.5], color=wall_color, linewidth=wall_lw)
+
+    # 4. Draw the outer border of the maze
+    ax.add_patch(patches.Rectangle((-0.5, -0.5), grid_size, grid_size, 
+                                   fill=False, edgecolor=wall_color, lw=wall_lw))
+    
+    # Add node position labels (optional, smaller font)
+    if grid_size <= 12:  # Only for smaller mazes
+        for position in range(grid_size * grid_size):
+            row, col = position // grid_size, position % grid_size
+            
+            # Add position label at the center of the cell
+            ax.text(col, row, str(position), 
+                   ha='center', va='center', fontsize=8, 
+                   color='black', weight='bold',
+                   bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.7),
+                   zorder=4)
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label('Activation Level', rotation=270, labelpad=15)
+    
+    # Set title
+    if title is None:
+        title = f"Neuron {neuron_idx} Activation Heatmap on Maze"
+    ax.set_title(title, fontsize=12, pad=10)
+    
+    # Set axis properties for an NxN grid
+    ax.set_xlim(-1, grid_size)
+    ax.set_ylim(-1, grid_size)
+    ax.set_aspect('equal')
+    
+    # Add row and column labels on the perimeter
+    col_labels = [str(col) for col in range(grid_size)]
+    ax.set_xticks(np.arange(grid_size))
+    ax.set_xticklabels(col_labels)
+    ax.tick_params(axis='x', which='major', labelsize=8, pad=2)
+    
+    row_labels = [str(row) for row in range(grid_size)]
+    ax.set_yticks(np.arange(grid_size))
+    ax.set_yticklabels(row_labels)
+    ax.tick_params(axis='y', which='major', labelsize=8, pad=2)
+    
+    # Add labels for axes
+    ax.set_xlabel('Column', fontsize=10, labelpad=5)
+    ax.set_ylabel('Row', fontsize=10, labelpad=5)
+    
+    return fig
+
+def create_maze_overlay_grid(results: Dict, layer_name: str, 
+                           neuron_indices: List[int], maze_data: Dict = None,
+                           figsize: tuple = (16, 12), cols: int = 4,
+                           cmap: str = 'RdYlBu_r', alpha: float = 0.9) -> plt.Figure:
+    """
+    Create a grid of maze overlay heatmaps for multiple neurons.
+    
+    Args:
+        results: Results from load_ffn_analysis_results
+        layer_name: Name of the layer to analyze
+        neuron_indices: List of neuron indices to visualize
+        maze_data: Maze structure data (if None, will try to load)
+        figsize: Figure size
+        cols: Number of columns in the grid
+        cmap: Colormap for activation heatmaps
+        alpha: Transparency of activation overlay
+    
+    Returns:
+        matplotlib Figure object
+    """
+    grid_size = results['grid_size']
+    
+    # Load maze data if not provided
+    if maze_data is None:
+        maze_data = load_maze_data(grid_size)
+    
+    # Get the activation matrix
+    if layer_name not in results['layer_matrices']:
+        raise ValueError(f"Layer {layer_name} not found in results")
+    
+    matrix = results['layer_matrices'][layer_name]  # (n_positions, n_neurons)
+    
+    # Calculate grid layout
+    n_plots = len(neuron_indices)
+    rows = (n_plots + cols - 1) // cols
+    
+    # Create figure and subplots
+    fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False)
+    axes = axes.flatten()
+    
+    # Create heatmap for each neuron
+    for i, neuron_idx in enumerate(neuron_indices):
+        ax = axes[i]
+        
+        # 1. Prepare and draw continuous activation heatmap
+        neuron_activations = matrix[:, neuron_idx]
+        activation_grid = neuron_activations.reshape((grid_size, grid_size))
+        masked_activations = np.ma.masked_where(np.isnan(activation_grid), activation_grid)
+        
+        ax.imshow(masked_activations, cmap=cmap, origin='lower', 
+                  alpha=alpha, zorder=1, interpolation='nearest',
+                  extent=(-0.5, grid_size - 0.5, -0.5, grid_size - 0.5))
+        
+        # 2. Draw maze walls as lines
+        if maze_data is not None:
+            adj_matrix = np.array(maze_data['adjacency_matrix'])
+            wall_color = '#2C3E50'
+            wall_lw = 5 if grid_size <= 24 else (1 if grid_size <= 48 else 0.5) # Increased wall thickness for grid view
+
+            for r in range(grid_size):
+                for c in range(grid_size):
+                    node_id = r * grid_size + c
+                    if c < grid_size - 1:
+                        neighbor_id = r * grid_size + (c + 1)
+                        if adj_matrix[node_id, neighbor_id] == 0:
+                            ax.plot([c + 0.5, c + 0.5], [r - 0.5, r + 0.5], color=wall_color, linewidth=wall_lw)
+                    if r < grid_size - 1:
+                        neighbor_id = (r + 1) * grid_size + c
+                        if adj_matrix[node_id, neighbor_id] == 0:
+                            ax.plot([c - 0.5, c + 0.5], [r + 0.5, r + 0.5], color=wall_color, linewidth=wall_lw)
+            
+            # Draw outer border
+            ax.add_patch(patches.Rectangle((-0.5, -0.5), grid_size, grid_size,
+                                           fill=False, edgecolor=wall_color, lw=wall_lw))
+
+        # Set title
+        ax.set_title(f"Neuron {neuron_idx}", fontsize=10)
+        
+        # Set axis properties
+        ax.set_aspect('equal')
+        ax.set_xlim(-0.5, grid_size - 0.5)
+        ax.set_ylim(-0.5, grid_size - 0.5)
+        ax.axis('off') # Keep it clean for the grid view
+    
+    # Hide unused subplots
+    for i in range(n_plots, len(axes)):
+        axes[i].set_visible(False)
+    
+    # Add overall title
+    fig.suptitle(f"{layer_name.upper()}: FFN Neuron Activations on Maze Structure", 
+                 fontsize=14, fontweight='bold', y=0.98)
+    
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    return fig
 
 def analyze_neuron_specialization(results: Dict, layer_name: str, top_k: int = 20) -> Dict:
     """
@@ -88,6 +359,97 @@ def analyze_neuron_specialization(results: Dict, layer_name: str, top_k: int = 2
         'all_neurons': neuron_specialization
     }
 
+def visualize_layer_overview_with_maze(results: Dict, layer_name: str, 
+                                     n_neurons_to_show: int = 100,
+                                     figsize: tuple = (16, 12),
+                                     maze_data: Dict = None):
+    """Visualize an overview of the most interesting neurons in a layer overlaid on maze."""
+    
+    grid_size = results['grid_size']
+    
+    # Load maze data if not provided
+    if maze_data is None:
+        maze_data = load_maze_data(grid_size)
+    
+    # Analyze specialization
+    specialization = analyze_neuron_specialization(results, layer_name, top_k=n_neurons_to_show)
+    top_neurons = specialization['top_specialized_neurons']
+    
+    if not top_neurons:
+        print(f"No valid neurons found for {layer_name}")
+        return None
+    
+    # Get the neuron indices to visualize
+    neuron_indices = [neuron['neuron_idx'] for neuron in top_neurons[:n_neurons_to_show]]
+    
+    # Create maze overlay grid
+    fig = create_maze_overlay_grid(
+        results, layer_name, neuron_indices, maze_data,
+        figsize=figsize, cols=4, alpha=0.8
+    )
+    
+    return fig
+
+def visualize_all_layers_with_maze(results: Dict, neurons_per_layer: int = 9,
+                                 save_dir: str = "ffn_visualizations"):
+    """Create maze overlay visualizations for all layers."""
+    
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    # Load maze data once
+    grid_size = results['grid_size']
+    maze_data = load_maze_data(grid_size)
+    
+    layer_names = sorted(results['layer_matrices'].keys())
+    
+    for layer_name in layer_names:
+        print(f"Creating maze overlay visualization for {layer_name}...")
+        
+        try:
+            fig = visualize_layer_overview_with_maze(
+                results, 
+                layer_name, 
+                n_neurons_to_show=neurons_per_layer,
+                figsize=(12, 9),
+                maze_data=maze_data
+            )
+            
+            if fig is not None:
+                # Save the figure
+                save_path = os.path.join(save_dir, f"{layer_name}_maze_overlay.png")
+                fig.savefig(save_path, dpi=300, bbox_inches='tight')
+                print(f"Saved {save_path}")
+                plt.close(fig)  # Close to save memory
+        
+        except Exception as e:
+            print(f"Error creating maze overlay visualization for {layer_name}: {e}")
+
+def create_single_neuron_maze_overlay(results: Dict, layer_name: str, neuron_idx: int,
+                                    save_path: str = None, figsize: tuple = (10, 8)):
+    """Create a single neuron maze overlay heatmap and optionally save it."""
+    
+    grid_size = results['grid_size']
+    maze_data = load_maze_data(grid_size)
+    
+    if layer_name not in results['layer_matrices']:
+        raise ValueError(f"Layer {layer_name} not found in results")
+    
+    matrix = results['layer_matrices'][layer_name]
+    
+    # Create the visualization
+    fig = create_maze_overlay_heatmap(
+        matrix, neuron_idx, maze_data, grid_size,
+        title=f"{layer_name.upper()} Neuron {neuron_idx} on Maze",
+        figsize=figsize
+    )
+    
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved single neuron maze overlay: {save_path}")
+    
+    return fig
+
 def visualize_layer_overview(results: Dict, layer_name: str, 
                            n_neurons_to_show: int = 16,
                            figsize: tuple = (16, 12)):
@@ -116,7 +478,7 @@ def visualize_layer_overview(results: Dict, layer_name: str,
     
     # Create visualization
     # Need to extract specific neurons and present as (n_positions, selected_neurons)
-    selected_matrix = matrix[:, neuron_indices]  # Shape: (64, len(neuron_indices))
+    selected_matrix = matrix[:, neuron_indices]  # Shape: (n_positions, selected_neurons)
     
     fig = plot_neuron_heatmaps(
         selected_matrix,  # Shape: (n_positions, selected_neurons)
@@ -320,9 +682,13 @@ def main():
     # Print comprehensive summary
     print_analysis_summary(results)
     
-    # Create visualizations for all layers
-    print("\nCreating layer overview visualizations...")
+    # Create traditional heatmap visualizations for all layers
+    print("\nCreating traditional layer overview visualizations...")
     visualize_all_layers_overview(results, neurons_per_layer=12)
+    
+    # Create NEW maze overlay visualizations for all layers
+    print("\nCreating maze overlay visualizations...")
+    visualize_all_layers_with_maze(results, neurons_per_layer=12)
     
     # Example: Compare layers for a specific position
     print("\nCreating position comparison across layers...")
@@ -332,6 +698,7 @@ def main():
     plt.close(fig)
     
     print("\nVisualization complete! Check the 'ffn_visualizations/' directory for results.")
+    print("New maze overlay files are saved with '_maze_overlay.png' suffix.")
     
     return results
 

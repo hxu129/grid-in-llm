@@ -121,6 +121,8 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
+train_sequences = None # Cache for training sequences
+val_sequences = None   # Cache for validation sequences
 
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
@@ -164,34 +166,41 @@ def get_batch(split):
 
 def get_path_batch(data, split):
     """Get batch for path learning with variable-length sequences."""
-    # For maze path data, we reconstruct sequences from the flattened data
-    # by splitting on the EOS token.
-    
-    if eos_token_id is None:
-        raise ValueError("get_path_batch is called but eos_token_id is not set. Is meta.pkl present?")
-    
-    if padding_token_id is None:
-        raise ValueError("get_path_batch is called but padding_token_id is not set. Is meta.pkl present?")
+    global train_sequences, val_sequences
 
-    # Find all indices of the newline token
-    # The data is a numpy memmap, so we can use numpy operations on it
-    newline_indices = np.where(data == eos_token_id)[0]
-    
-    # Create sequences by splitting the data array based on the newline token
-    sequences = []
-    start_idx = 0
-    for end_idx in newline_indices:
-        # Extract the sequence, excluding the newline token itself
-        seq = data[start_idx:end_idx].tolist()
-        if seq:  # Avoid adding empty sequences
-            sequences.append(seq)
-        start_idx = end_idx + 1
-    
-    # Add the last sequence if the file doesn't end with a newline token
-    if start_idx < len(data):
-        seq = data[start_idx:].tolist()
-        if seq:
-            sequences.append(seq)
+    sequences = train_sequences if split == 'train' else val_sequences
+
+    if sequences is None:
+        if eos_token_id is None:
+            raise ValueError("get_path_batch is called but eos_token_id is not set. Is meta.pkl present?")
+        if padding_token_id is None:
+            raise ValueError("get_path_batch is called but padding_token_id is not set. Is meta.pkl present?")
+
+        # First-time setup: process and cache sequences
+        print(f"Processing and caching sequences for '{split}' split...")
+        newline_indices = np.where(data == eos_token_id)[0]
+        
+        processed_sequences = []
+        start_idx = 0
+        for end_idx in newline_indices:
+            # Extract the sequence, excluding the newline token itself
+            seq = data[start_idx:end_idx].tolist()
+            if seq:  # Avoid adding empty sequences
+                processed_sequences.append(seq)
+            start_idx = end_idx + 1
+        
+        # Add the last sequence if the file doesn't end with a newline token
+        if start_idx < len(data):
+            seq = data[start_idx:].tolist()
+            if seq:
+                processed_sequences.append(seq)
+        
+        sequences = processed_sequences
+        if split == 'train':
+            train_sequences = sequences
+        else: # 'val'
+            val_sequences = sequences
+        print(f"Cached {len(sequences)} sequences for '{split}' split.")
 
     # Sample batch_size sequences
     if not sequences:
@@ -279,7 +288,7 @@ iter_num = 0
 best_val_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
-meta_path = os.path.join(data_dir, 'meta.pkl')
+meta_path = os.path.join(data_dir, f'meta_{maze_size}.pkl')
 meta_vocab_size = None
 eos_token_id = None
 padding_token_id = None
@@ -324,7 +333,8 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    dataset_name = dataset.split('/')[-1]
+    ckpt_path = os.path.join(out_dir, f'ckpt_{maze_size}_{dataset_name}.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -354,6 +364,20 @@ elif init_from.startswith('gpt2'):
         model_args[k] = getattr(model.config, k)
 # No need to crop model since we use sinusoidal embeddings
 model.to(device)
+
+if master_process:
+    # Log training and model parameters
+    dataset_name = dataset.split('/')[-1]
+    log_file_path = os.path.join(out_dir, f'log_{maze_size}_{dataset_name}.txt')
+    with open(log_file_path, 'w') as f:
+        f.write("--- Training Parameters ---\n")
+        for key, value in config.items():
+            f.write(f'{key}: {value}\n')
+        f.write("\n--- Model Parameters ---\n")
+        for key, value in model_args.items():
+            f.write(f'{key}: {value}\n')
+        f.write("\n--- Training Log ---\n")
+    print(f"Parameters logged to {log_file_path}")
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
@@ -434,6 +458,8 @@ while True:
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        with open(log_file_path, 'a') as f:
+            f.write(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}\n")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -454,7 +480,8 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                dataset_name = dataset.split('/')[-1]
+                torch.save(checkpoint, os.path.join(out_dir, f'ckpt_{maze_size}_{dataset_name}.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -496,6 +523,8 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        with open(log_file_path, 'a') as f:
+            f.write(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%\n")
     iter_num += 1
     local_iter_num += 1
 
